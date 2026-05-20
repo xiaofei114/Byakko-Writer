@@ -13,10 +13,8 @@ use commands::{
     create_chapter, delete_chapter,
     load_chapter_content, save_chapter_content, update_chapter_title,
     // AI 相关命令
-    send_ai_message,
-    generate_chapter_summary, load_chapter_summary, confirm_chapter_summary, batch_generate_summaries,
+    generate_chapter_summary, load_chapter_summary,
     send_chat_message_stream, get_chat_history, get_chat_sessions, delete_chat_session,
-    polish_text,
     // 快照相关命令
     create_chapter_snapshot, list_chapter_snapshots, get_chapter_snapshot,
     delete_chapter_snapshot, cleanup_chapter_snapshots, compare_snapshots,
@@ -75,19 +73,14 @@ fn main() {
             // 配置
             load_config,
             save_config,
-            // AI
-            send_ai_message,
             // AI 摘要
             generate_chapter_summary,
             load_chapter_summary,
-            confirm_chapter_summary,
-            batch_generate_summaries,
             // AI 聊天
             send_chat_message_stream,
             get_chat_history,
             get_chat_sessions,
             delete_chat_session,
-            polish_text,
             // 章节快照
             create_chapter_snapshot,
             list_chapter_snapshots,

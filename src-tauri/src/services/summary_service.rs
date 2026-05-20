@@ -137,59 +137,6 @@ pub async fn load_chapter_summary(chapter_id: String) -> anyhow::Result<Option<C
     }
 }
 
-/// 确认章节摘要
-pub async fn confirm_chapter_summary(chapter_id: String) -> anyhow::Result<()> {
-    let pool = get_pool().await?;
-    
-    sqlx::query(
-        "UPDATE chapter_summaries SET is_confirmed = 1 WHERE chapter_id = ?1"
-    )
-    .bind(&chapter_id)
-    .execute(pool)
-    .await?;
-    
-    Ok(())
-}
-
-/// 批量生成摘要
-pub async fn batch_generate_summaries(
-    chapter_ids: Vec<String>,
-    config: AIConfig,
-) -> anyhow::Result<Vec<(String, anyhow::Result<ChapterSummary>)>> {
-    let mut results = vec![];
-    
-    for chapter_id in chapter_ids {
-        // 获取章节信息
-        let pool = get_pool().await?;
-        let row = sqlx::query(
-            "SELECT title, content FROM chapters WHERE id = ?1"
-        )
-        .bind(&chapter_id)
-        .fetch_optional(pool)
-        .await?;
-        
-        if let Some(row) = row {
-            let title: String = row.try_get("title")?;
-            let content: String = row.try_get("content")?;
-            
-            let result = generate_chapter_summary(
-                chapter_id.clone(),
-                title,
-                content,
-                config.clone(),
-            ).await;
-            
-            results.push((chapter_id, result));
-        } else {
-            results.push((chapter_id, Err(anyhow::anyhow!("章节不存在"))));
-        }
-    }
-    
-    Ok(results)
-}
-
-
-
 /// 查询章节详细摘要
 pub async fn query_chapter_summary(chapter_id: &str) -> anyhow::Result<String> {
     let pool = get_pool().await?;

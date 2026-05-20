@@ -1,16 +1,6 @@
 use tauri::AppHandle;
 use crate::models::{AIConfig, ChapterSummary, ChatSession, AIChatMessage};
-use crate::services::{ai_service, summary_service, chat_service};
-
-/// 发送 AI 消息（非流式）
-#[tauri::command]
-pub async fn send_ai_message(
-    message: String,
-    history: Vec<crate::models::ChatMessage>,
-    config: AIConfig,
-) -> Result<String, String> {
-    ai_service::send_ai_message(message, history, config).await.map_err(|e| e.to_string())
-}
+use crate::services::{summary_service, chat_service};
 
 /// 生成章节摘要
 #[tauri::command]
@@ -29,42 +19,6 @@ pub async fn generate_chapter_summary(
 #[tauri::command]
 pub async fn load_chapter_summary(chapter_id: String) -> Result<Option<ChapterSummary>, String> {
     summary_service::load_chapter_summary(chapter_id).await.map_err(|e| e.to_string())
-}
-
-/// 确认章节摘要
-#[tauri::command]
-pub async fn confirm_chapter_summary(chapter_id: String) -> Result<(), String> {
-    summary_service::confirm_chapter_summary(chapter_id).await.map_err(|e| e.to_string())
-}
-
-/// 批量生成摘要
-#[tauri::command]
-pub async fn batch_generate_summaries(
-    chapter_ids: Vec<String>,
-    config: AIConfig,
-) -> Result<Vec<serde_json::Value>, String> {
-    let results = summary_service::batch_generate_summaries(chapter_ids, config).await
-        .map_err(|e| e.to_string())?;
-    
-    let json_results: Vec<serde_json::Value> = results
-        .into_iter()
-        .map(|(id, result)| {
-            match result {
-                Ok(summary) => serde_json::json!({
-                    "chapterId": id,
-                    "success": true,
-                    "summary": summary
-                }),
-                Err(e) => serde_json::json!({
-                    "chapterId": id,
-                    "success": false,
-                    "error": e.to_string()
-                }),
-            }
-        })
-        .collect();
-    
-    Ok(json_results)
 }
 
 /// 发送流式聊天消息
@@ -102,14 +56,4 @@ pub async fn get_chat_sessions(book_id: String) -> Result<Vec<ChatSession>, Stri
 #[tauri::command]
 pub async fn delete_chat_session(session_id: String) -> Result<(), String> {
     chat_service::delete_chat_session(&session_id).await.map_err(|e| e.to_string())
-}
-
-/// 润色文本
-#[tauri::command]
-pub async fn polish_text(
-    text: String,
-    config: AIConfig,
-) -> Result<String, String> {
-    use crate::services::ai_service;
-    ai_service::polish_text(&text, config).await.map_err(|e| e.to_string())
 }

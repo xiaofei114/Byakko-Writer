@@ -62,33 +62,6 @@ export interface RecentBook {
   lastOpenedAt: number;
 }
 
-// ==================== RAG / 向量数据库类型 ====================
-
-export interface VectorDocument {
-  id: string;
-  content: string;
-  embedding: number[];
-  docType: 'chapter_summary' | 'character' | 'setting' | 'scrap';
-  bookId: string;
-  metadata: string;
-}
-
-export interface SearchResult {
-  id: string;
-  content: string;
-  docType: string;
-  bookId: string;
-  metadata: string;
-  score: number;
-}
-
-export interface EmbeddingConfig {
-  provider: string;
-  apiKey: string;
-  apiUrl: string;
-  model: string;
-}
-
 // 角色卡
 export interface CharacterCard {
   id: string;
@@ -113,20 +86,6 @@ export interface CharacterRelationship {
   targetName: string;
   relationship: string;
   description: string;
-}
-
-// 设定卡
-export interface SettingCard {
-  id: string;
-  bookId: string;
-  category: 'world' | 'magic' | 'faction' | 'location' | 'item' | 'custom';
-  name: string;
-  description: string;
-  details: Record<string, string>;
-  tags: string[];
-  notes: string;
-  createdAt: number;
-  updatedAt: number;
 }
 
 // 章节摘要
