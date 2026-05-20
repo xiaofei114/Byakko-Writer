@@ -175,7 +175,7 @@ const hasOutline = (outline: Outline | null): boolean => {
 
 // 监听大纲保存事件
 const handleOutlineSaved = (event: CustomEvent<{ chapterId: string; outlineType: string }>) => {
-  const { chapterId, outlineType } = event.detail;
+  const { chapterId } = event.detail;
 
   // 如果保存的是当前章节的大纲
   if (chapterId === props.currentChapterId) {

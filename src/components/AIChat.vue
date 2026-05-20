@@ -253,12 +253,6 @@ const startTypewriter = (fastMode = false) => {
   typewriterTimer.value = window.setInterval(typeNextChar, interval);
 };
 
-// 添加内容到打字机缓冲区
-const addToTypewriterBuffer = (content: string) => {
-  typewriterBuffer.value += content;
-  startTypewriter(false); // 正常速度
-};
-
 // 加速显示剩余内容（对话完成时使用）
 const speedUpTypewriter = () => {
   if (typewriterBuffer.value.length > 0) {

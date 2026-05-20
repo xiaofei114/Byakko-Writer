@@ -253,7 +253,7 @@ const stopResize = () => {
 
 // 监听大纲保存事件（从 AIChat 组件发送）
 const handleOutlineSaved = (event: CustomEvent<{ chapterId: string; outlineType: string }>) => {
-  const { chapterId, outlineType } = event.detail;
+  const { chapterId } = event.detail;
 
   // 如果当前正在编辑该章节的大纲，刷新数据
   if (showOutlineEditing.value &&
