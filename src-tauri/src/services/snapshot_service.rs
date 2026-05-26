@@ -18,7 +18,7 @@ fn get_db_path(book_id: &str) -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(&book_dir)?;
     
     let db_path = book_dir.join("chapter_snapshots.db");
-    log::info!("[Snapshot] 数据库文件路径: {}", db_path.display());
+    // log::info!("[Snapshot] 数据库文件路径: {}", db_path.display());
     
     Ok(db_path)
 }
@@ -35,7 +35,7 @@ async fn init_db(book_id: &str) -> anyhow::Result<Pool<Sqlite>> {
         format!("sqlite:///{}", normalized)
     };
     
-    log::info!("[Snapshot] 数据库路径: {}", db_url);
+    // log::info!("[Snapshot] 数据库路径: {}", db_url);
 
     let connect_options = SqliteConnectOptions::from_str(&db_url)?
         .create_if_missing(true);

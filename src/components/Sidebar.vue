@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick } from 'vue';
 import { useBookStore } from '../stores/book';
+import { useConfigStore } from '../stores/config';
 import {
   ArrowLeft,
   FolderAdd,
@@ -12,11 +13,13 @@ import {
   Collection,
   Reading,
   ArrowRight,
+  Setting,
 } from '@element-plus/icons-vue';
 import { ElMessageBox, ElMessage } from 'element-plus';
 import type Node from 'element-plus/es/components/tree/src/model/node';
 
 const bookStore = useBookStore();
+const configStore = useConfigStore();
 
 const props = withDefaults(defineProps<{
   showOutlineEditing?: boolean;
@@ -312,7 +315,7 @@ const handleSidebarClick = (event: MouseEvent) => {
 
 <template>
   <div class="sidebar" @click="handleSidebarClick">
-    <!-- 头部：返回按钮和书名 -->
+    <!-- 头部：返回按钮、书名和设置 -->
     <header class="sidebar-header">
       <el-button
         circle
@@ -324,6 +327,13 @@ const handleSidebarClick = (event: MouseEvent) => {
       <el-tooltip :content="bookStore.currentBook?.title || '未命名书籍'" placement="bottom">
         <h2 class="book-title">{{ bookStore.currentBook?.title || '未命名书籍' }}</h2>
       </el-tooltip>
+      <el-button
+        circle
+        :icon="Setting"
+        @click="configStore.openSettings()"
+        title="设置"
+        class="settings-btn"
+      />
     </header>
 
     <!-- 模式切换标签 -->
@@ -540,6 +550,10 @@ const handleSidebarClick = (event: MouseEvent) => {
 }
 
 .back-btn {
+  flex-shrink: 0;
+}
+
+.settings-btn {
   flex-shrink: 0;
 }
 

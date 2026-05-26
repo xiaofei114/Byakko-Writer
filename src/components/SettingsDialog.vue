@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { ref, watch } from 'vue';
 import { useConfigStore } from '../stores/config';
+import { useBookStore } from '../stores/book';
 import {
   Setting,
   Grid,
@@ -8,11 +9,67 @@ import {
   EditPen,
   InfoFilled,
   Link,
-  Sunny as SunnyIcon
+  Sunny as SunnyIcon,
+  Collection,
+  Refresh,
 } from '@element-plus/icons-vue';
+import { ElMessage } from 'element-plus';
+import { getStoryMemoryText, updateStoryMemory } from '../api/storyMemory';
+import type { StoryMemoryUpdateResult } from '../types';
 
 const configStore = useConfigStore();
-const activeTab = ref<'general' | 'ai'>('general');
+const bookStore = useBookStore();
+const activeTab = ref<'general' | 'ai' | 'storyMemory'>('general');
+
+// 故事记忆状态
+const storyMemoryText = ref('');
+const storyMemoryLoading = ref(false);
+const storyMemoryResult = ref<StoryMemoryUpdateResult | null>(null);
+
+const loadStoryMemory = async () => {
+  if (!bookStore.currentBook) return;
+  storyMemoryLoading.value = true;
+  try {
+    storyMemoryText.value = await getStoryMemoryText(bookStore.currentBook.id);
+  } catch (e) {
+    storyMemoryText.value = '';
+  } finally {
+    storyMemoryLoading.value = false;
+  }
+};
+
+const handleRefreshStoryMemory = async () => {
+  if (!bookStore.currentBook) return;
+  storyMemoryLoading.value = true;
+  storyMemoryResult.value = null;
+  try {
+    storyMemoryResult.value = await updateStoryMemory(bookStore.currentBook.id);
+    if (storyMemoryResult.value.success) {
+      ElMessage.success(storyMemoryResult.value.message);
+      await loadStoryMemory();
+    } else {
+      ElMessage.error(storyMemoryResult.value.message);
+    }
+  } catch (e) {
+    ElMessage.error(`更新失败: ${e}`);
+  } finally {
+    storyMemoryLoading.value = false;
+  }
+};
+
+// 打开设置时自动加载
+watch(() => configStore.isSettingsOpen, (open) => {
+  if (open && bookStore.currentBook) {
+    loadStoryMemory();
+  }
+});
+
+// 切换到故事记忆 tab 时加载
+watch(activeTab, (tab) => {
+  if (tab === 'storyMemory' && bookStore.currentBook) {
+    loadStoryMemory();
+  }
+});
 
 const themes = [
   { value: 'light', label: '浅色' },
@@ -365,6 +422,81 @@ const onFontChange = () => {
           </div>
         </div>
       </el-tab-pane>
+
+      <!-- 故事记忆 -->
+      <el-tab-pane name="storyMemory">
+        <template #label>
+          <span class="tab-label">
+            <el-icon><Collection /></el-icon>
+            <span>故事记忆</span>
+          </span>
+        </template>
+
+        <div class="settings-form">
+          <el-divider content-position="left">
+            <span class="divider-title">AI 故事记忆（Story Bible）</span>
+          </el-divider>
+
+          <div class="story-memory-hint" v-if="!bookStore.currentBook">
+            <el-icon><InfoFilled /></el-icon>
+            <span>请先打开一本书，再查看故事记忆</span>
+          </div>
+
+          <template v-else>
+            <div class="form-row">
+              <el-button
+                type="primary"
+                :icon="Refresh"
+                :loading="storyMemoryLoading"
+                @click="handleRefreshStoryMemory"
+              >
+                刷新故事记忆
+              </el-button>
+              <span class="form-hint">AI 将分析全书章节摘要，生成压缩的故事记忆，帮助长篇写作时保持上下文</span>
+            </div>
+
+            <div class="story-memory-result" v-if="storyMemoryResult">
+              <el-alert
+                :type="storyMemoryResult.success ? 'success' : 'error'"
+                :title="storyMemoryResult.message"
+                :closable="true"
+                @close="storyMemoryResult = null"
+              />
+              <!-- 分组进度 -->
+              <div class="group-progress" v-if="storyMemoryResult.groups && storyMemoryResult.groups.length > 0">
+                <div
+                  v-for="g in storyMemoryResult.groups"
+                  :key="g.group_index"
+                  class="group-progress-item"
+                  :class="'status-' + g.status"
+                >
+                  <span class="group-tag">
+                    <el-tag
+                      :type="g.status === 'cached' ? 'info' : g.status === 'generated' ? 'success' : 'danger'"
+                      size="small"
+                    >
+                      {{ g.status === 'cached' ? '缓存' : g.status === 'generated' ? '生成' : '失败' }}
+                    </el-tag>
+                  </span>
+                  <span class="group-msg">{{ g.message }}</span>
+                </div>
+              </div>
+            </div>
+
+            <el-divider content-position="left">
+              <span class="divider-title">当前故事记忆内容</span>
+            </el-divider>
+
+            <div class="story-memory-text" v-loading="storyMemoryLoading">
+              <pre v-if="storyMemoryText">{{ storyMemoryText }}</pre>
+              <div class="story-memory-empty" v-else-if="!storyMemoryLoading">
+                <el-icon><InfoFilled /></el-icon>
+                <span>尚未生成故事记忆。请先为章节生成摘要，然后点击「刷新故事记忆」按钮。</span>
+              </div>
+            </div>
+          </template>
+        </div>
+      </el-tab-pane>
     </el-tabs>
   </el-dialog>
 </template>
@@ -460,5 +592,80 @@ const onFontChange = () => {
 
 .form-link a:hover {
   text-decoration: underline;
+}
+
+/* ===== 故事记忆 ===== */
+.story-memory-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 0;
+  font-size: 13px;
+  color: var(--nw-text-tertiary);
+}
+
+.story-memory-hint .el-icon {
+  font-size: 16px;
+  color: var(--nw-accent);
+}
+
+.form-hint {
+  font-size: 12px;
+  color: var(--nw-text-tertiary);
+  max-width: 280px;
+}
+
+.story-memory-result {
+  margin: 8px 0;
+}
+
+.story-memory-text {
+  max-height: 360px;
+  overflow-y: auto;
+  background: var(--nw-bg-secondary);
+  border-radius: var(--nw-radius-sm);
+  padding: var(--nw-space-md);
+}
+
+.story-memory-text pre {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--nw-text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--nw-font-body);
+}
+
+.story-memory-empty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--nw-text-tertiary);
+  padding: 8px 0;
+}
+
+.group-progress {
+  margin-top: 12px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.group-progress-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 12px;
+}
+
+.group-tag {
+  flex-shrink: 0;
+  width: 48px;
+}
+
+.group-msg {
+  color: var(--nw-text-secondary);
 }
 </style>

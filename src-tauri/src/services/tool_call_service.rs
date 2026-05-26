@@ -282,6 +282,32 @@ pub async fn execute_tool_call(tool_call: &ToolCall) -> anyhow::Result<String> {
             }
         }
 
+        // 故事记忆相关工具
+        "get_story_memory" => {
+            let book_id = tool_call.arguments.get("bookId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 bookId 参数"))?;
+            crate::services::story_memory_service::build_story_memory_text(book_id).await
+        }
+        "get_character_timeline" => {
+            let book_id = tool_call.arguments.get("bookId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 bookId 参数"))?;
+            let name = tool_call.arguments.get("characterName")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 characterName 参数"))?;
+            crate::services::story_memory_service::build_character_timeline(book_id, name).await
+        }
+        "list_chapters_in_volume" => {
+            let book_id = tool_call.arguments.get("bookId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 bookId 参数"))?;
+            let volume_id = tool_call.arguments.get("volumeId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 volumeId 参数"))?;
+            crate::services::story_memory_service::get_chapters_in_volume(book_id, volume_id).await
+        }
+
         _ => Err(anyhow::anyhow!("未知工具: {}", tool_call.name)),
     }
 }

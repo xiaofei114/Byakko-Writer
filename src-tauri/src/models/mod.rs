@@ -7,6 +7,7 @@ pub mod chat;
 pub mod config;
 pub mod writing_style;
 pub mod conflict;
+pub mod story_memory;
 
 pub use book::*;
 pub use ai::*;
@@ -17,3 +18,4 @@ pub use chat::*;
 pub use config::*;
 pub use writing_style::*;
 pub use conflict::*;
+pub use story_memory::*;

@@ -373,6 +373,48 @@ async fn create_tables(pool: &DbPool) -> anyhow::Result<()> {
         .execute(pool)
         .await?;
 
+    // 故事记忆分组摘要表（每 10 章一组的缓存）
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS story_memory_groups (
+            book_id TEXT NOT NULL,
+            group_index INTEGER NOT NULL,
+            start_chapter INTEGER NOT NULL,
+            end_chapter INTEGER NOT NULL,
+            chapter_ids TEXT NOT NULL DEFAULT '[]',
+            summary TEXT NOT NULL DEFAULT '',
+            word_count INTEGER NOT NULL DEFAULT 0,
+            generated_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (book_id, group_index),
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+        )
+        "#
+    )
+    .execute(pool)
+    .await?;
+
+    // 故事记忆表（Story Bible）—— 最终大总结
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS story_memory (
+            book_id TEXT PRIMARY KEY,
+            book_summary TEXT NOT NULL DEFAULT '',
+            volume_summaries TEXT NOT NULL DEFAULT '[]',
+            event_timeline TEXT NOT NULL DEFAULT '[]',
+            protagonist_status TEXT NOT NULL DEFAULT '',
+            key_character_statuses TEXT NOT NULL DEFAULT '[]',
+            unresolved_threads TEXT NOT NULL DEFAULT '[]',
+            world_rules TEXT NOT NULL DEFAULT '',
+            last_chapter_count INTEGER NOT NULL DEFAULT 0,
+            last_word_count INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+        )
+        "#
+    )
+    .execute(pool)
+    .await?;
+
     // 冲突检测进度跟踪表
     sqlx::query(
         r#"

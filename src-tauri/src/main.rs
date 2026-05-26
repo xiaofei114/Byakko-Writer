@@ -32,11 +32,13 @@ use commands::{
     trigger_style_analysis,
     // 冲突检测相关命令
     run_conflict_detection, ignore_conflict, get_active_conflicts,
+    // 故事记忆相关命令
+    get_story_memory, update_story_memory, get_story_memory_text,
 };
 
 fn main() {
     // 初始化日志 - 设置默认日志级别为 info
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .init();
     log::info!("应用启动");
     
@@ -50,6 +52,11 @@ fn main() {
     // 启动后台自动风格分析服务
     tauri::async_runtime::spawn(async {
         services::auto_style_service::start_auto_style_service().await;
+    });
+
+    // 启动后台故事记忆自动更新服务
+    tauri::async_runtime::spawn(async {
+        services::auto_story_memory::start_auto_story_memory_service().await;
     });
     
     tauri::Builder::default()
@@ -120,6 +127,10 @@ fn main() {
             run_conflict_detection,
             ignore_conflict,
             get_active_conflicts,
+            // 故事记忆
+            get_story_memory,
+            update_story_memory,
+            get_story_memory_text,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

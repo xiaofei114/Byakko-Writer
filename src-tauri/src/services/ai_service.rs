@@ -15,11 +15,30 @@ fn build_api_url(config: &AIConfig) -> String {
     }
 }
 
-/// 调用 AI 生成摘要
+/// 调用 AI 生成摘要（max_tokens 默认 2000，可通过 override 指定）
 pub async fn call_ai_for_summary(
     prompt: &str,
     system_prompt: &str,
     config: &AIConfig,
+) -> anyhow::Result<String> {
+    call_ai_with_max_tokens(prompt, system_prompt, config, 2000).await
+}
+
+/// 调用 AI 生成大容量摘要（用于 Story Bible 等需要大量输出的场景）
+pub async fn call_ai_for_large_summary(
+    prompt: &str,
+    system_prompt: &str,
+    config: &AIConfig,
+    max_tokens: i32,
+) -> anyhow::Result<String> {
+    call_ai_with_max_tokens(prompt, system_prompt, config, max_tokens).await
+}
+
+async fn call_ai_with_max_tokens(
+    prompt: &str,
+    system_prompt: &str,
+    config: &AIConfig,
+    max_tokens: i32,
 ) -> anyhow::Result<String> {
     if config.api_key.is_empty() {
         return Err(anyhow::anyhow!("API Key 未配置"));
@@ -41,7 +60,7 @@ pub async fn call_ai_for_summary(
             }
         ],
         "temperature": 0.3,
-        "max_tokens": 2000,
+        "max_tokens": max_tokens,
         "response_format": { "type": "json_object" }
     });
 

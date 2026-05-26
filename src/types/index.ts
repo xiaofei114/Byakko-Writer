@@ -224,3 +224,56 @@ export interface ConflictCheckResult {
   checkedChapters: number;
   checkedWordCount: number;
 }
+
+// ==================== 故事记忆类型 ====================
+
+export interface VolumeSummaryItem {
+  title: string;
+  summary: string;
+}
+
+export interface EventTimelineItem {
+  chapter: number;
+  title: string;
+  event: string;
+  impact: string;
+  arc: string;
+}
+
+export interface KeyCharacterStatus {
+  name: string;
+  status: string;
+  location: string;
+}
+
+export interface StoryMemory {
+  book_id: string;
+  book_summary: string;
+  volume_summaries: VolumeSummaryItem[];
+  event_timeline: EventTimelineItem[];
+  protagonist_status: string;
+  key_character_statuses: KeyCharacterStatus[];
+  unresolved_threads: string[];
+  world_rules: string;
+  last_chapter_count: number;
+  last_word_count: number;
+  updated_at: number;
+}
+
+export interface GroupProgress {
+  group_index: number;
+  start_chapter: number;
+  end_chapter: number;
+  status: string; // "cached" | "generated" | "error"
+  message: string;
+}
+
+export interface StoryMemoryUpdateResult {
+  success: boolean;
+  message: string;
+  chapter_count: number;
+  total_word_count: number;
+  groups: GroupProgress[];
+  groups_cached: number;
+  groups_generated: number;
+}

@@ -12,3 +12,5 @@ pub mod tool_call_service;
 pub mod auto_style_service;
 pub mod agent_orchestrator;
 pub mod conflict_service;
+pub mod story_memory_service;
+pub mod auto_story_memory;
