@@ -14,7 +14,7 @@ use commands::{
     load_chapter_content, save_chapter_content, update_chapter_title,
     // AI 相关命令
     generate_chapter_summary, load_chapter_summary,
-    send_chat_message_stream, get_chat_history, get_chat_sessions, delete_chat_session,
+    send_chat_message_stream, get_chat_history, get_chat_sessions, delete_chat_session, update_message_polish_handled, send_polish_request,
     // 快照相关命令
     create_chapter_snapshot, list_chapter_snapshots, get_chapter_snapshot,
     delete_chapter_snapshot, cleanup_chapter_snapshots, compare_snapshots,
@@ -30,6 +30,8 @@ use commands::{
     learn_writing_style, get_style_prompt, update_style_config,
     get_user_writing_style, get_book_writing_style, check_should_learn_style,
     trigger_style_analysis,
+    // 冲突检测相关命令
+    run_conflict_detection, ignore_conflict, get_active_conflicts,
 };
 
 fn main() {
@@ -81,6 +83,8 @@ fn main() {
             get_chat_history,
             get_chat_sessions,
             delete_chat_session,
+            update_message_polish_handled,
+            send_polish_request,
             // 章节快照
             create_chapter_snapshot,
             list_chapter_snapshots,
@@ -112,6 +116,10 @@ fn main() {
             get_book_writing_style,
             check_should_learn_style,
             trigger_style_analysis,
+            // 冲突检测
+            run_conflict_detection,
+            ignore_conflict,
+            get_active_conflicts,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

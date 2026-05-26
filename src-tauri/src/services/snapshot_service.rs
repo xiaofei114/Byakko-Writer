@@ -1,5 +1,7 @@
 use std::path::PathBuf;
-use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
+use std::str::FromStr;
+use sqlx::sqlite::{SqlitePoolOptions, SqliteConnectOptions};
+use sqlx::{Pool, Sqlite};
 use chrono::Utc;
 use log;
 use crate::models::{ChapterSnapshot, SnapshotDiff};
@@ -34,10 +36,13 @@ async fn init_db(book_id: &str) -> anyhow::Result<Pool<Sqlite>> {
     };
     
     log::info!("[Snapshot] 数据库路径: {}", db_url);
-    
+
+    let connect_options = SqliteConnectOptions::from_str(&db_url)?
+        .create_if_missing(true);
+
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
-        .connect(&db_url)
+        .connect_with(connect_options)
         .await
         .map_err(|e| anyhow::anyhow!("连接数据库失败 ({}): {}", db_url, e))?;
     

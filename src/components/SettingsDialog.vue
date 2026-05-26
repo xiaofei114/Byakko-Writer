@@ -351,6 +351,18 @@ const onFontChange = () => {
               @change="configStore.saveConfig"
             />
           </div>
+
+          <div class="form-row">
+            <label class="form-label">最大决策轮次</label>
+            <el-input-number
+              v-model="configStore.config.ai.maxRounds"
+              :min="3"
+              :max="20"
+              :step="1"
+              @change="configStore.saveConfig"
+            />
+            <span class="form-hint">AI 调用工具的最大轮次数，越大上下文越完整但耗时越长</span>
+          </div>
         </div>
       </el-tab-pane>
     </el-tabs>

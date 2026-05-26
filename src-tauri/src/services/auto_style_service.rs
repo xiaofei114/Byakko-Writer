@@ -78,7 +78,32 @@ async fn check_and_analyze_styles() -> anyhow::Result<()> {
         }
     }
     
+    // 3. 检查各书籍是否需要冲突检测（仅提示，不自动执行，用户点按钮触发）
+    let books_to_check = get_books_needing_conflict_check(pool).await?;
+    for book_id in books_to_check {
+        log::info!("[Auto Style] 书籍 {} 字数增长较多，建议手动检查设定冲突", book_id);
+    }
+
     Ok(())
+}
+
+/// 获取需要冲突检测的书籍列表（仅检查阈值，不做实际检测）
+async fn get_books_needing_conflict_check(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+) -> anyhow::Result<Vec<String>> {
+    let books = sqlx::query_scalar::<_, String>("SELECT id FROM books")
+        .fetch_all(pool)
+        .await?;
+
+    let mut needs_check = Vec::new();
+    for book_id in books {
+        match crate::services::conflict_service::check_should_detect(&book_id).await {
+            Ok(true) => needs_check.push(book_id),
+            Ok(false) => {},
+            Err(e) => log::error!("[Auto Style] 检查书籍 {} 时出错: {}", book_id, e),
+        }
+    }
+    Ok(needs_check)
 }
 
 /// 检查全局风格是否需要更新

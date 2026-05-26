@@ -31,6 +31,7 @@ impl Default for AppConfig {
                 model: "deepseek-chat".to_string(),
                 temperature: 0.7,
                 max_tokens: 10000,
+                max_rounds: 10,
             },
         }
     }

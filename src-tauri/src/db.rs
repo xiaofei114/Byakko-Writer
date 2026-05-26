@@ -200,6 +200,7 @@ async fn create_tables(pool: &DbPool) -> anyhow::Result<()> {
             content TEXT NOT NULL,
             context_type TEXT,
             timestamp INTEGER NOT NULL,
+            polish_handled INTEGER NOT NULL DEFAULT 0,
             FOREIGN KEY (session_id) REFERENCES chat_sessions(session_id) ON DELETE CASCADE,
             FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE,
             FOREIGN KEY (chapter_id) REFERENCES chapters(id) ON DELETE SET NULL
@@ -208,6 +209,11 @@ async fn create_tables(pool: &DbPool) -> anyhow::Result<()> {
     )
     .execute(pool)
     .await?;
+
+    // 迁移：为已存在的表添加 polish_handled 字段
+    let _ = sqlx::query("ALTER TABLE chat_messages ADD COLUMN polish_handled INTEGER NOT NULL DEFAULT 0")
+        .execute(pool)
+        .await;
     
     // 创建索引
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_volumes_book_id ON volumes(book_id)")
@@ -344,7 +350,44 @@ async fn create_tables(pool: &DbPool) -> anyhow::Result<()> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_book_writing_styles_book_id ON book_writing_styles(book_id)")
         .execute(pool)
         .await?;
-    
+
+    // 设定冲突检测表
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS detected_conflicts (
+            id TEXT PRIMARY KEY,
+            book_id TEXT NOT NULL,
+            description TEXT NOT NULL,
+            suggestion TEXT NOT NULL DEFAULT '',
+            detected_at INTEGER NOT NULL,
+            is_ignored INTEGER NOT NULL DEFAULT 0,
+            ignored_at INTEGER,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+        )
+        "#
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_conflicts_book_id ON detected_conflicts(book_id)")
+        .execute(pool)
+        .await?;
+
+    // 冲突检测进度跟踪表
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS conflict_check_progress (
+            book_id TEXT PRIMARY KEY,
+            last_checked_word_count INTEGER NOT NULL DEFAULT 0,
+            last_checked_chapter_count INTEGER NOT NULL DEFAULT 0,
+            last_checked_at INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+        )
+        "#
+    )
+    .execute(pool)
+    .await?;
+
     Ok(())
 }
 

@@ -54,6 +54,37 @@ pub async fn learn_writing_style(params: LearnStyleParams) -> anyhow::Result<Lea
         });
     }
 
+    // 检查是否真的需要重新分析：字数增长不足20%则跳过
+    if let Some(book_id) = &params.book_id {
+        let existing = sqlx::query_as::<_, (i64, i64)>(
+            "SELECT COALESCE(total_word_count, 0), COALESCE(chapter_count, 0) FROM book_writing_styles WHERE book_id = ?1"
+        )
+        .bind(book_id)
+        .fetch_optional(pool)
+        .await?;
+
+        if let Some((prev_words, prev_chapters)) = existing {
+            if prev_words > 0 && !params.force_relearn {
+                let word_growth = total_word_count as f64 / prev_words as f64;
+                let chapter_growth = chapters_to_analyze.len() as i64 - prev_chapters;
+                if word_growth < 1.2 && chapter_growth < 3 {
+                    return Ok(LearnStyleResult {
+                        success: true,
+                        message: format!(
+                            "风格分析已是最新（当前{}字/{}章，上次{}字/{}章，增长率{:.0}%），无需重新分析",
+                            total_word_count, chapters_to_analyze.len(),
+                            prev_words, prev_chapters,
+                            (word_growth - 1.0) * 100.0
+                        ),
+                        analyzed_chapters: 0,
+                        total_word_count,
+                        style_prompt_preview: String::new(),
+                    });
+                }
+            }
+        }
+    }
+
     // 调用 AI 分析写作风格
     let style_analysis = analyze_writing_style_with_ai(&combined_content).await?;
 

@@ -15,6 +15,9 @@ for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
   app.component(key, component);
 }
 
+// 禁用右键菜单（桌面应用不需要浏览器右键菜单）
+document.addEventListener('contextmenu', (e) => e.preventDefault());
+
 app.use(createPinia());
 app.use(ElementPlus);
 app.mount("#app");

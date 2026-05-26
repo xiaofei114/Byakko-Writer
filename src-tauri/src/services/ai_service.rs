@@ -1,6 +1,6 @@
 use reqwest::Client;
 use serde_json::json;
-use crate::models::{AIConfig, ChatMessage, AIApiResponse};
+use crate::models::{AIConfig, ChatMessage, AIApiResponse, AiDecision, ToolDef};
 
 /// 构建完整的 API URL
 fn build_api_url(config: &AIConfig) -> String {
@@ -64,8 +64,64 @@ pub async fn call_ai_for_summary(
     ai_response
         .choices
         .get(0)
-        .map(|c| c.message.content.clone())
+        .and_then(|c| c.message.content.clone())
         .ok_or_else(|| anyhow::anyhow!("AI 未返回内容"))
+}
+
+/// 非流式发送 AI 消息（用于Agent内部调用，支持 function calling）
+pub async fn send_ai_message(
+    history: Vec<ChatMessage>,
+    config: AIConfig,
+    tools: Option<&[ToolDef]>,
+) -> anyhow::Result<AiDecision> {
+    if config.api_key.is_empty() {
+        return Err(anyhow::anyhow!("API Key 未配置"));
+    }
+
+    let api_url = build_api_url(&config);
+    let client = Client::new();
+
+    let mut request_body = json!({
+        "model": config.model,
+        "messages": history,
+        "temperature": config.temperature,
+        "max_tokens": config.max_tokens,
+        "stream": false
+    });
+
+    if let Some(t) = tools {
+        if !t.is_empty() {
+            request_body["tools"] = json!(t);
+            request_body["tool_choice"] = json!("auto");
+        }
+    }
+
+    let response = client
+        .post(&api_url)
+        .header("Authorization", format!("Bearer {}", config.api_key))
+        .header("Content-Type", "application/json")
+        .json(&request_body)
+        .send()
+        .await?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let error_text = response.text().await.unwrap_or_default();
+        return Err(anyhow::anyhow!("API错误 ({}): {}", status, error_text));
+    }
+
+    let ai_response: AIApiResponse = response.json().await?;
+
+    let choice = ai_response
+        .choices
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("AI 未返回内容"))?;
+
+    Ok(AiDecision {
+        content: choice.message.content.filter(|s| !s.is_empty()),
+        tool_calls: choice.message.tool_calls.filter(|t| !t.is_empty()),
+    })
 }
 
 /// 流式发送 AI 消息
@@ -156,6 +212,6 @@ pub async fn call_ai_for_style_analysis(
     ai_response
         .choices
         .get(0)
-        .map(|c| c.message.content.clone())
+        .and_then(|c| c.message.content.clone())
         .ok_or_else(|| anyhow::anyhow!("AI 未返回内容"))
 }

@@ -1,14 +1,17 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch } from 'vue';
+import { invoke } from '@tauri-apps/api/core';
 import Sidebar from '../components/Sidebar.vue';
 import WritingArea from '../components/WritingArea.vue';
 import AIChat from '../components/AIChat.vue';
 import SnapshotManager from '../components/SnapshotManager.vue';
 import CharacterCardManager from '../components/CharacterCardManager.vue';
 import QuickReferencePanel from '../components/QuickReferencePanel.vue';
+import ConflictDialog from '../components/ConflictDialog.vue';
+import ConflictSidebar from '../components/ConflictSidebar.vue';
 import { useBookStore } from '../stores/book';
-import { ChatRound, User, Document, ArrowLeft, Check, View, Edit } from '@element-plus/icons-vue';
-import { ElMessage } from 'element-plus';
+import { ChatRound, User, Document, ArrowLeft, Check, View, Edit, WarningFilled } from '@element-plus/icons-vue';
+import { ElMessage, ElNotification } from 'element-plus';
 import { marked } from 'marked';
 
 marked.setOptions({
@@ -264,16 +267,51 @@ const handleOutlineSaved = (event: CustomEvent<{ chapterId: string; outlineType:
   }
 };
 
+// 冲突检测
+import type { DetectedConflict } from '../types';
+const showConflictDialog = ref(false);
+const showConflictSidebar = ref(false);
+const conflictList = ref<DetectedConflict[]>([]);
+
+const checkConflictsInBackground = async () => {
+  if (!bookStore.currentBook) return;
+  try {
+    const conflicts = await invoke<DetectedConflict[]>('get_active_conflicts', { bookId: bookStore.currentBook.id });
+    if (conflicts.length > 0) {
+      conflictList.value = conflicts;
+      showConflictDialog.value = true;
+      ElNotification({
+        title: '设定冲突检测',
+        message: `检测到 ${conflicts.length} 个剧情冲突，请及时查看`,
+        type: 'warning',
+        duration: 5000,
+      });
+    }
+  } catch (e) {
+    // 后台静默，忽略错误
+  }
+};
+
+const handleConflictIgnored = (conflictId: string) => {
+  conflictList.value = conflictList.value.filter(c => c.id !== conflictId);
+  if (conflictList.value.length === 0) {
+    showConflictDialog.value = false;
+  }
+};
+
 onMounted(() => {
   document.addEventListener('mousemove', handleMouseMove);
   document.addEventListener('mouseup', stopResize);
   document.addEventListener('keydown', handleKeydown);
-  
+
   // 监听页面关闭/刷新事件
   window.addEventListener('beforeunload', handleBeforeUnload);
-  
+
   // 监听大纲保存事件
   window.addEventListener('outline-saved', handleOutlineSaved as EventListener);
+
+  // 后台静默执行冲突检测
+  checkConflictsInBackground();
 });
 
 onUnmounted(() => {
@@ -438,6 +476,14 @@ const handleBeforeUnload = (_e: BeforeUnloadEvent) => {
           @click="showQuickOutlinePanel = true"
         />
       </el-tooltip>
+      <el-tooltip content="检测设定冲突" placement="left">
+        <el-button
+          circle
+          type="warning"
+          :icon="WarningFilled"
+          @click="showConflictSidebar = true"
+        />
+      </el-tooltip>
     </div>
 
     <!-- 弹窗组件 -->
@@ -448,6 +494,17 @@ const handleBeforeUnload = (_e: BeforeUnloadEvent) => {
       type="outline"
       @open-full-manager="showQuickOutlinePanel = false"
     />
+
+    <!-- 设定冲突检测弹窗 -->
+    <ConflictDialog
+      :visible="showConflictDialog"
+      :conflicts="conflictList"
+      :book-id="bookStore.currentBook?.id || ''"
+      @close="showConflictDialog = false"
+      @ignored="handleConflictIgnored"
+    />
+    <!-- 设定冲突检测 -->
+    <ConflictSidebar v-model="showConflictSidebar" />
   </div>
 </template>
 

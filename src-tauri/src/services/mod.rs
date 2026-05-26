@@ -10,3 +10,5 @@ pub mod prompt_service;
 pub mod style_service;
 pub mod tool_call_service;
 pub mod auto_style_service;
+pub mod agent_orchestrator;
+pub mod conflict_service;

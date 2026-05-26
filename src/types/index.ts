@@ -36,6 +36,7 @@ export interface AIConfig {
   model: string;
   temperature: number;
   maxTokens: number;
+  maxRounds: number;
 }
 
 export interface AppConfig {
@@ -109,14 +110,13 @@ export interface AIChatMessage {
   bookId: string;
   chapterId?: string;
   sessionId: string;
-  role: 'user' | 'assistant' | 'system' | 'tool';
+  role: 'user' | 'assistant' | 'system' | 'tool' | 'outline' | 'write' | 'conflict';
   content: string;
   contextType?: 'normal' | 'rag' | 'summary';
   timestamp: number;
   toolName?: string;
   toolStatus?: 'calling' | 'success' | 'error';
   polishHandled?: boolean; // 润色是否已处理（应用或取消）
-  outlineHandled?: boolean; // 大纲是否已处理（应用或取消）
 }
 
 export interface ChatSession {
@@ -203,4 +203,24 @@ export interface OutlineInfo {
   outline_type: OutlineType;
   has_content: boolean;
   updated_at: number;
+}
+
+// 设定冲突检测
+export interface DetectedConflict {
+  id: string;
+  bookId: string;
+  description: string;
+  suggestion: string;
+  severity?: string;
+  detectedAt: number;
+  isIgnored: number;
+  ignoredAt?: number;
+}
+
+export interface ConflictCheckResult {
+  hasConflicts: boolean;
+  totalChecked: number;
+  conflicts: DetectedConflict[];
+  checkedChapters: number;
+  checkedWordCount: number;
 }

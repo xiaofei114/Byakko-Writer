@@ -90,9 +90,10 @@ pub async fn get_character_card(card_id: String) -> anyhow::Result<CharacterCard
         "#
     )
     .bind(&card_id)
-    .fetch_one(pool)
-    .await?;
-    
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("角色卡 {} 不存在", card_id))?;
+
     Ok(card)
 }
 

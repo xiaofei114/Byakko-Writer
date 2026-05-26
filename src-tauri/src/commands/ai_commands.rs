@@ -57,3 +57,25 @@ pub async fn get_chat_sessions(book_id: String) -> Result<Vec<ChatSession>, Stri
 pub async fn delete_chat_session(session_id: String) -> Result<(), String> {
     chat_service::delete_chat_session(&session_id).await.map_err(|e| e.to_string())
 }
+
+/// 更新消息的 polish_handled 状态
+#[tauri::command]
+pub async fn update_message_polish_handled(message_id: String, handled: bool) -> Result<(), String> {
+    chat_service::update_message_polish_handled(&message_id, handled).await.map_err(|e| e.to_string())
+}
+
+/// 发送润色请求（独立流程）
+#[tauri::command]
+pub async fn send_polish_request(
+    app: AppHandle,
+    session_id: Option<String>,
+    book_id: String,
+    chapter_id: Option<String>,
+    original_text: String,
+    instruction: String,
+    config: AIConfig,
+) -> Result<String, String> {
+    chat_service::send_polish_request(app, session_id, book_id, chapter_id, original_text, instruction, config)
+        .await
+        .map_err(|e| e.to_string())
+}

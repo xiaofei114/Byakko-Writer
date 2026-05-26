@@ -12,7 +12,11 @@ pub struct AIConfig {
     pub temperature: f32,
     #[serde(alias = "maxTokens")]
     pub max_tokens: i32,
+    #[serde(alias = "maxRounds", default = "default_max_rounds")]
+    pub max_rounds: i32,
 }
+
+fn default_max_rounds() -> i32 { 10 }
 
 /// 工具调用定义
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,7 +74,40 @@ pub struct Choice {
 
 #[derive(Debug, Deserialize)]
 pub struct ResponseMessage {
-    pub content: String,
+    pub content: Option<String>,
+    #[serde(default)]
+    pub tool_calls: Option<Vec<ToolCallDefinition>>,
+}
+
+/// AI 决策结果（function calling 返回的结构化结果）
+#[derive(Debug, Clone)]
+pub struct AiDecision {
+    /// 自然语言内容（直接回答时）
+    pub content: Option<String>,
+    /// 工具调用列表（需要执行工具时）
+    pub tool_calls: Option<Vec<ToolCallDefinition>>,
+}
+
+impl AiDecision {
+    /// 是否为工具调用
+    pub fn is_tool_call(&self) -> bool {
+        self.tool_calls.as_ref().map_or(false, |t| !t.is_empty())
+    }
+}
+
+/// 工具定义（发送给 AI 的 function schema）
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolDef {
+    #[serde(rename = "type")]
+    pub def_type: String,
+    pub function: FunctionDef,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FunctionDef {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
 }
 
 /// 章节摘要
@@ -105,15 +142,6 @@ pub struct SummaryResponse {
 pub struct ToolCall {
     pub name: String,
     pub arguments: serde_json::Value,
-}
-
-/// 工具定义
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub struct Tool {
-    pub name: String,
-    pub description: String,
-    pub parameters: serde_json::Value,
 }
 
 

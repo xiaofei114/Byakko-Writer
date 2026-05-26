@@ -19,6 +19,7 @@ interface BackendConfig {
     model: string;
     temperature: number;
     max_tokens: number;
+    max_rounds: number;
   };
 }
 
@@ -36,7 +37,8 @@ const defaultConfig: AppConfig = {
     apiUrl: 'https://api.deepseek.com/v1',
     model: 'deepseek-chat',
     temperature: 0.7,
-    maxTokens: 2000
+    maxTokens: 2000,
+    maxRounds: 10
   }
 };
 
@@ -69,7 +71,8 @@ export const useConfigStore = defineStore('config', () => {
         apiUrl: backend.ai.api_url,
         model: backend.ai.model,
         temperature: backend.ai.temperature,
-        maxTokens: backend.ai.max_tokens
+        maxTokens: backend.ai.max_tokens,
+        maxRounds: backend.ai.max_rounds || 10
       }
     };
   };
@@ -90,7 +93,8 @@ export const useConfigStore = defineStore('config', () => {
         api_url: cfg.ai.apiUrl,
         model: cfg.ai.model,
         temperature: cfg.ai.temperature,
-        max_tokens: cfg.ai.maxTokens
+        max_tokens: cfg.ai.maxTokens,
+        max_rounds: cfg.ai.maxRounds
       }
     };
   };

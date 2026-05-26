@@ -6,6 +6,7 @@ pub mod outline;
 pub mod chat;
 pub mod config;
 pub mod writing_style;
+pub mod conflict;
 
 pub use book::*;
 pub use ai::*;
@@ -15,3 +16,4 @@ pub use outline::*;
 pub use chat::*;
 pub use config::*;
 pub use writing_style::*;
+pub use conflict::*;

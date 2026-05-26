@@ -150,9 +150,14 @@ pub async fn query_chapter_summary(chapter_id: &str) -> anyhow::Result<String> {
         "#
     )
     .bind(chapter_id)
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await?;
-    
+
+    let row = match row {
+        Some(r) => r,
+        None => return Ok(format!("章节 {} 不存在或没有摘要", chapter_id)),
+    };
+
     let title: String = row.try_get("title")?;
     let short_summary: Option<String> = row.try_get("short_summary").ok();
     let long_summary: Option<String> = row.try_get("long_summary").ok();
@@ -183,9 +188,14 @@ pub async fn query_chapter_content(chapter_id: &str) -> anyhow::Result<String> {
         "SELECT title, content FROM chapters WHERE id = ?"
     )
     .bind(chapter_id)
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await?;
-    
+
+    let row = match row {
+        Some(r) => r,
+        None => return Ok(format!("章节 {} 不存在", chapter_id)),
+    };
+
     let title: String = row.try_get("title")?;
     let content: String = row.try_get("content")?;
     

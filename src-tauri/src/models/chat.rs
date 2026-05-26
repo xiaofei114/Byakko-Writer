@@ -13,6 +13,7 @@ pub struct AIChatMessage {
     pub content: String,
     pub context_type: Option<String>,
     pub timestamp: i64,
+    pub polish_handled: i32,
 }
 
 /// 对话会话结构
