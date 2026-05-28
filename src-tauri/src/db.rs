@@ -201,6 +201,7 @@ async fn create_tables(pool: &DbPool) -> anyhow::Result<()> {
             context_type TEXT,
             timestamp INTEGER NOT NULL,
             polish_handled INTEGER NOT NULL DEFAULT 0,
+            handled_status TEXT,
             FOREIGN KEY (session_id) REFERENCES chat_sessions(session_id) ON DELETE CASCADE,
             FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE,
             FOREIGN KEY (chapter_id) REFERENCES chapters(id) ON DELETE SET NULL
@@ -212,6 +213,11 @@ async fn create_tables(pool: &DbPool) -> anyhow::Result<()> {
 
     // 迁移：为已存在的表添加 polish_handled 字段
     let _ = sqlx::query("ALTER TABLE chat_messages ADD COLUMN polish_handled INTEGER NOT NULL DEFAULT 0")
+        .execute(pool)
+        .await;
+
+    // 迁移：为已存在的表添加 handled_status 字段
+    let _ = sqlx::query("ALTER TABLE chat_messages ADD COLUMN handled_status TEXT")
         .execute(pool)
         .await;
     
@@ -423,12 +429,47 @@ async fn create_tables(pool: &DbPool) -> anyhow::Result<()> {
             last_checked_word_count INTEGER NOT NULL DEFAULT 0,
             last_checked_chapter_count INTEGER NOT NULL DEFAULT 0,
             last_checked_at INTEGER NOT NULL DEFAULT 0,
+            last_status TEXT NOT NULL DEFAULT 'idle',
+            last_error_kind TEXT,
+            last_error_message TEXT,
+            last_error_at INTEGER NOT NULL DEFAULT 0,
+            last_auto_checked_at INTEGER NOT NULL DEFAULT 0,
             FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
         )
         "#
     )
     .execute(pool)
     .await?;
+
+    let _ = sqlx::query("ALTER TABLE conflict_check_progress ADD COLUMN last_status TEXT NOT NULL DEFAULT 'idle'")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE conflict_check_progress ADD COLUMN last_error_kind TEXT")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE conflict_check_progress ADD COLUMN last_error_message TEXT")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE conflict_check_progress ADD COLUMN last_error_at INTEGER NOT NULL DEFAULT 0")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE conflict_check_progress ADD COLUMN last_auto_checked_at INTEGER NOT NULL DEFAULT 0")
+        .execute(pool)
+        .await;
+
+    // 章节摘要表新增字段（用于增强摘要）
+    let _ = sqlx::query("ALTER TABLE chapter_summaries ADD COLUMN plot_progression TEXT")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE chapter_summaries ADD COLUMN emotional_beats TEXT NOT NULL DEFAULT '[]'")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE chapter_summaries ADD COLUMN foreshadowing TEXT NOT NULL DEFAULT '[]'")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE chapter_summaries ADD COLUMN unresolved_threads TEXT NOT NULL DEFAULT '[]'")
+        .execute(pool)
+        .await;
 
     Ok(())
 }

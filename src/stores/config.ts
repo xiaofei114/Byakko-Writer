@@ -12,6 +12,7 @@ interface BackendConfig {
   line_height: number;
   auto_save: boolean;
   auto_save_interval: number;
+  auto_story_memory?: boolean;
   ai: {
     provider: string;
     api_key: string;
@@ -31,6 +32,7 @@ const defaultConfig: AppConfig = {
   lineHeight: 1.8,
   autoSave: true,
   autoSaveInterval: 30,
+  autoStoryMemory: true,
   ai: {
     provider: 'deepseek',
     apiKey: '',
@@ -38,7 +40,7 @@ const defaultConfig: AppConfig = {
     model: 'deepseek-chat',
     temperature: 0.7,
     maxTokens: 2000,
-    maxRounds: 10
+    maxRounds: 30
   }
 };
 
@@ -65,6 +67,7 @@ export const useConfigStore = defineStore('config', () => {
       lineHeight: backend.line_height,
       autoSave: backend.auto_save,
       autoSaveInterval: backend.auto_save_interval,
+      autoStoryMemory: backend.auto_story_memory ?? true,
       ai: {
         provider: backend.ai.provider,
         apiKey: backend.ai.api_key,
@@ -72,7 +75,7 @@ export const useConfigStore = defineStore('config', () => {
         model: backend.ai.model,
         temperature: backend.ai.temperature,
         maxTokens: backend.ai.max_tokens,
-        maxRounds: backend.ai.max_rounds || 10
+        maxRounds: backend.ai.max_rounds || 30
       }
     };
   };
@@ -87,6 +90,7 @@ export const useConfigStore = defineStore('config', () => {
       line_height: cfg.lineHeight,
       auto_save: cfg.autoSave,
       auto_save_interval: cfg.autoSaveInterval,
+      auto_story_memory: cfg.autoStoryMemory,
       ai: {
         provider: cfg.ai.provider,
         api_key: cfg.ai.apiKey,

@@ -12,9 +12,11 @@ import {
   Sunny as SunnyIcon,
   Collection,
   Refresh,
+  Delete,
+  Warning,
 } from '@element-plus/icons-vue';
 import { ElMessage } from 'element-plus';
-import { getStoryMemoryText, updateStoryMemory } from '../api/storyMemory';
+import { getStoryMemoryText, updateStoryMemory, forceRegenerateStoryMemory } from '../api/storyMemory';
 import type { StoryMemoryUpdateResult } from '../types';
 
 const configStore = useConfigStore();
@@ -25,6 +27,28 @@ const activeTab = ref<'general' | 'ai' | 'storyMemory'>('general');
 const storyMemoryText = ref('');
 const storyMemoryLoading = ref(false);
 const storyMemoryResult = ref<StoryMemoryUpdateResult | null>(null);
+const showForceRegenerateConfirm = ref(false);
+
+// 处理强制重新生成
+const handleForceRegenerate = async () => {
+  if (!bookStore.currentBook) return;
+  showForceRegenerateConfirm.value = false;
+  storyMemoryLoading.value = true;
+  storyMemoryResult.value = null;
+  try {
+    storyMemoryResult.value = await forceRegenerateStoryMemory(bookStore.currentBook.id);
+    if (storyMemoryResult.value.success) {
+      ElMessage.success('故事记忆已强制重新生成');
+      await loadStoryMemory();
+    } else {
+      ElMessage.error(storyMemoryResult.value.message);
+    }
+  } catch (e) {
+    ElMessage.error(`强制重新生成失败: ${e}`);
+  } finally {
+    storyMemoryLoading.value = false;
+  }
+};
 
 const loadStoryMemory = async () => {
   if (!bookStore.currentBook) return;
@@ -180,6 +204,7 @@ const onFontChange = () => {
     :close-on-click-modal="false"
     destroy-on-close
     class="settings-dialog"
+    top="5vh"
   >
     <template #header>
       <div class="dialog-header">
@@ -413,12 +438,14 @@ const onFontChange = () => {
             <label class="form-label">最大决策轮次</label>
             <el-input-number
               v-model="configStore.config.ai.maxRounds"
-              :min="3"
-              :max="20"
+              :min="20"
+              :max="50"
               :step="1"
               @change="configStore.saveConfig"
             />
-            <span class="form-hint">AI 调用工具的最大轮次数，越大上下文越完整但耗时越长</span>
+          </div>
+          <div class="form-hint-row">
+            <span class="form-hint">AI 调用工具的最大轮次数，可设置为 20-50；越大上下文越完整但耗时越长</span>
           </div>
         </div>
       </el-tab-pane>
@@ -443,18 +470,67 @@ const onFontChange = () => {
           </div>
 
           <template v-else>
-            <div class="form-row">
-              <el-button
-                type="primary"
-                :icon="Refresh"
-                :loading="storyMemoryLoading"
-                @click="handleRefreshStoryMemory"
-              >
-                刷新故事记忆
-              </el-button>
-              <span class="form-hint">AI 将分析全书章节摘要，生成压缩的故事记忆，帮助长篇写作时保持上下文</span>
+            <!-- 自动故事记忆开关 -->
+            <div class="auto-story-memory-toggle">
+              <el-switch
+                v-model="configStore.config.autoStoryMemory"
+                @change="configStore.saveConfig"
+                active-text="自动更新故事记忆"
+              />
+              <span class="toggle-hint">每30分钟自动检查并更新故事记忆</span>
             </div>
 
+            <!-- 操作按钮区域 -->
+            <div class="story-memory-actions">
+              <div class="action-row">
+                <el-button
+                  type="primary"
+                  :icon="Refresh"
+                  :loading="storyMemoryLoading"
+                  @click="handleRefreshStoryMemory"
+                >
+                  刷新故事记忆
+                </el-button>
+                <el-button
+                  type="danger"
+                  plain
+                  :icon="Delete"
+                  :loading="storyMemoryLoading"
+                  @click="showForceRegenerateConfirm = true"
+                >
+                  强制重新生成
+                </el-button>
+              </div>
+              <div class="action-hint">
+                <p><strong>刷新</strong>：使用已有缓存，仅更新缺失部分，速度快</p>
+                <p><strong>强制重新生成</strong>：清除所有缓存，重新分析所有章节，速度慢但质量更高</p>
+              </div>
+            </div>
+
+            <!-- 确认对话框 -->
+            <el-dialog
+              v-model="showForceRegenerateConfirm"
+              title="确认强制重新生成"
+              width="400px"
+              :close-on-click-modal="false"
+            >
+              <div class="confirm-content">
+                <el-icon :size="40" color="#f56c6c"><Warning /></el-icon>
+                <p>此操作将：</p>
+                <ul>
+                  <li>清除所有章节摘要缓存</li>
+                  <li>清除所有分组总结缓存</li>
+                  <li>重新生成所有内容（可能需要几分钟）</li>
+                </ul>
+                <p class="warning-text">确定要继续吗？</p>
+              </div>
+              <template #footer>
+                <el-button @click="showForceRegenerateConfirm = false">取消</el-button>
+                <el-button type="danger" @click="handleForceRegenerate">确定重新生成</el-button>
+              </template>
+            </el-dialog>
+
+            <!-- 生成结果 -->
             <div class="story-memory-result" v-if="storyMemoryResult">
               <el-alert
                 :type="storyMemoryResult.success ? 'success' : 'error'"
@@ -462,8 +538,16 @@ const onFontChange = () => {
                 :closable="true"
                 @close="storyMemoryResult = null"
               />
+              <!-- 统计信息 -->
+              <div class="stats-row" v-if="storyMemoryResult.success">
+                <el-statistic title="章节数" :value="storyMemoryResult.chapter_count" />
+                <el-statistic title="总字数" :value="storyMemoryResult.total_word_count" />
+                <el-statistic title="缓存分组" :value="storyMemoryResult.groups_cached" />
+                <el-statistic title="生成分组" :value="storyMemoryResult.groups_generated" />
+              </div>
               <!-- 分组进度 -->
               <div class="group-progress" v-if="storyMemoryResult.groups && storyMemoryResult.groups.length > 0">
+                <div class="group-progress-title">分组处理详情：</div>
                 <div
                   v-for="g in storyMemoryResult.groups"
                   :key="g.group_index"
@@ -502,6 +586,22 @@ const onFontChange = () => {
 </template>
 
 <style scoped>
+/* 对话框整体 - 约束高度，body可滚动，header固定 */
+.settings-dialog :deep(.el-dialog) {
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+}
+.settings-dialog :deep(.el-dialog__header) {
+  flex-shrink: 0;
+}
+.settings-dialog :deep(.el-dialog__body) {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+  padding-top: 0;
+}
+
 .dialog-header {
   display: flex;
   align-items: center;
@@ -594,6 +694,10 @@ const onFontChange = () => {
   text-decoration: underline;
 }
 
+.form-hint-row {
+  margin: -2px 0 4px 82px;
+}
+
 /* ===== 故事记忆 ===== */
 .story-memory-hint {
   display: flex;
@@ -620,21 +724,23 @@ const onFontChange = () => {
 }
 
 .story-memory-text {
-  max-height: 360px;
-  overflow-y: auto;
+  max-height: 280px;
+  overflow: hidden;
   background: var(--nw-bg-secondary);
   border-radius: var(--nw-radius-sm);
-  padding: var(--nw-space-md);
 }
 
 .story-memory-text pre {
   margin: 0;
+  padding: var(--nw-space-md);
   font-size: 13px;
   line-height: 1.7;
   color: var(--nw-text-primary);
   white-space: pre-wrap;
   word-break: break-word;
   font-family: var(--nw-font-body);
+  max-height: 280px;
+  overflow-y: auto;
 }
 
 .story-memory-empty {
@@ -643,7 +749,7 @@ const onFontChange = () => {
   gap: 8px;
   font-size: 13px;
   color: var(--nw-text-tertiary);
-  padding: 8px 0;
+  padding: var(--nw-space-md);
 }
 
 .group-progress {
@@ -667,5 +773,101 @@ const onFontChange = () => {
 
 .group-msg {
   color: var(--nw-text-secondary);
+}
+
+/* ===== 自动故事记忆开关 ===== */
+.auto-story-memory-toggle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 12px;
+  background: var(--nw-bg-tertiary);
+  border-radius: var(--nw-radius-sm);
+}
+
+.toggle-hint {
+  font-size: 12px;
+  color: var(--nw-text-tertiary);
+}
+
+/* ===== 故事记忆操作区域 ===== */
+.story-memory-actions {
+  background: var(--nw-bg-secondary);
+  border-radius: var(--nw-radius-md);
+  padding: var(--nw-space-md);
+  margin-bottom: var(--nw-space-md);
+}
+
+.action-row {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.action-hint {
+  font-size: 12px;
+  color: var(--nw-text-tertiary);
+  line-height: 1.6;
+}
+
+.action-hint p {
+  margin: 4px 0;
+}
+
+/* 确认对话框 */
+.confirm-content {
+  text-align: center;
+  padding: 16px 0;
+}
+
+.confirm-content .el-icon {
+  margin-bottom: 16px;
+}
+
+.confirm-content ul {
+  text-align: left;
+  display: inline-block;
+  margin: 12px 0;
+  padding-left: 20px;
+  color: var(--nw-text-secondary);
+}
+
+.confirm-content li {
+  margin: 4px 0;
+}
+
+.warning-text {
+  color: #f56c6c;
+  font-weight: 600;
+  margin-top: 16px;
+}
+
+/* 统计信息 */
+.stats-row {
+  display: flex;
+  justify-content: space-around;
+  margin: 16px 0;
+  padding: 12px;
+  background: var(--nw-bg-tertiary);
+  border-radius: var(--nw-radius-sm);
+}
+
+.stats-row :deep(.el-statistic__content) {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--nw-primary);
+}
+
+.stats-row :deep(.el-statistic__title) {
+  font-size: 12px;
+  color: var(--nw-text-tertiary);
+}
+
+.group-progress-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--nw-text-secondary);
+  margin-bottom: 8px;
 }
 </style>

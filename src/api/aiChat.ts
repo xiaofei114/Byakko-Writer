@@ -10,6 +10,7 @@ export interface StreamEvent {
   toolName?: string;
   toolDisplayName?: string;
   toolParams?: Record<string, any>;
+  sessionStarted?: boolean;
 }
 
 // Agent 阶段事件
@@ -27,6 +28,7 @@ export interface ChatStreamCallbacks {
   onComplete: (sessionId?: string) => void;
   onError: (error: string) => void;
   onAgentPhase?: (event: AgentPhaseEvent) => void;
+  onSessionStarted?: (sessionId: string) => void;
 }
 
 /**
@@ -51,6 +53,12 @@ export async function sendChatMessageStream(
   // 设置流式事件监听
   const unlistenStream = await listen<StreamEvent>('ai-chat-stream', (event) => {
     const data = event.payload;
+
+    // sessionStarted 表示会话已创建，更新 sessionId 但不结束对话
+    if (data.sessionStarted && data.sessionId) {
+      callbacks.onSessionStarted?.(data.sessionId);
+      return;
+    }
 
     if (data.isComplete) {
       isCompleted = true;
@@ -135,6 +143,10 @@ export async function deleteChatSession(sessionId: string): Promise<void> {
  */
 export async function updateMessagePolishHandled(messageId: string, handled: boolean): Promise<void> {
   return await invoke('update_message_polish_handled', { messageId, handled });
+}
+
+export async function updateLineEditHandledStatus(messageId: string, handledStatus: string): Promise<void> {
+  return await invoke('update_line_edit_handled_status', { messageId, handledStatus });
 }
 
 /**

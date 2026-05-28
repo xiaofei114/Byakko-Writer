@@ -53,6 +53,10 @@ pub async fn generate_chapter_summary(
         characters: summary_data.characters,
         locations: summary_data.locations,
         events: summary_data.events,
+        plot_progression: summary_data.plot_progression,
+        emotional_beats: summary_data.emotional_beats,
+        foreshadowing: summary_data.foreshadowing,
+        unresolved_threads: summary_data.unresolved_threads,
         generated_at: chrono::Utc::now().timestamp(),
         is_confirmed: false,
     };
@@ -66,19 +70,23 @@ pub async fn generate_chapter_summary(
 }
 
 /// 保存摘要到数据库
-async fn save_summary_to_db(summary: &ChapterSummary) -> anyhow::Result<()> {
+pub async fn save_summary_to_db(summary: &ChapterSummary) -> anyhow::Result<()> {
     let pool = get_pool().await?;
     
     let tags_json = serde_json::to_string(&summary.tags)?;
     let characters_json = serde_json::to_string(&summary.characters)?;
     let locations_json = serde_json::to_string(&summary.locations)?;
     let events_json = serde_json::to_string(&summary.events)?;
+    let emotional_beats_json = serde_json::to_string(&summary.emotional_beats)?;
+    let foreshadowing_json = serde_json::to_string(&summary.foreshadowing)?;
+    let unresolved_threads_json = serde_json::to_string(&summary.unresolved_threads)?;
     
     sqlx::query(
         r#"
         INSERT OR REPLACE INTO chapter_summaries 
-        (id, chapter_id, short_summary, long_summary, tags, characters, locations, events, generated_at, is_confirmed)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        (id, chapter_id, short_summary, long_summary, tags, characters, locations, events, 
+         plot_progression, emotional_beats, foreshadowing, unresolved_threads, generated_at, is_confirmed)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
         "#
     )
     .bind(&summary.id)
@@ -89,6 +97,10 @@ async fn save_summary_to_db(summary: &ChapterSummary) -> anyhow::Result<()> {
     .bind(&characters_json)
     .bind(&locations_json)
     .bind(&events_json)
+    .bind(&summary.plot_progression)
+    .bind(&emotional_beats_json)
+    .bind(&foreshadowing_json)
+    .bind(&unresolved_threads_json)
     .bind(summary.generated_at)
     .bind(summary.is_confirmed)
     .execute(pool)
@@ -103,7 +115,8 @@ pub async fn load_chapter_summary(chapter_id: String) -> anyhow::Result<Option<C
     
     let row = sqlx::query(
         r#"
-        SELECT id, chapter_id, short_summary, long_summary, tags, characters, locations, events, generated_at, is_confirmed
+        SELECT id, chapter_id, short_summary, long_summary, tags, characters, locations, events, 
+               plot_progression, emotional_beats, foreshadowing, unresolved_threads, generated_at, is_confirmed
         FROM chapter_summaries
         WHERE chapter_id = ?1
         "#
@@ -117,6 +130,9 @@ pub async fn load_chapter_summary(chapter_id: String) -> anyhow::Result<Option<C
         let characters_json: String = row.try_get("characters")?;
         let locations_json: String = row.try_get("locations")?;
         let events_json: String = row.try_get("events")?;
+        let emotional_beats_json: String = row.try_get("emotional_beats")?;
+        let foreshadowing_json: String = row.try_get("foreshadowing")?;
+        let unresolved_threads_json: String = row.try_get("unresolved_threads")?;
         
         let summary = ChapterSummary {
             id: row.try_get("id")?,
@@ -127,6 +143,10 @@ pub async fn load_chapter_summary(chapter_id: String) -> anyhow::Result<Option<C
             characters: serde_json::from_str(&characters_json)?,
             locations: serde_json::from_str(&locations_json)?,
             events: serde_json::from_str(&events_json)?,
+            plot_progression: row.try_get("plot_progression").ok(),
+            emotional_beats: serde_json::from_str(&emotional_beats_json).unwrap_or_default(),
+            foreshadowing: serde_json::from_str(&foreshadowing_json).unwrap_or_default(),
+            unresolved_threads: serde_json::from_str(&unresolved_threads_json).unwrap_or_default(),
             generated_at: row.try_get("generated_at")?,
             is_confirmed: row.try_get("is_confirmed")?,
         };

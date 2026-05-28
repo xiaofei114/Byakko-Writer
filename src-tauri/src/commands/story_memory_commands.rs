@@ -15,6 +15,17 @@ pub async fn update_story_memory(
     app: tauri::AppHandle,
     book_id: String,
 ) -> Result<StoryMemoryUpdateResult, String> {
+    story_memory_service::update_story_memory(&app, &book_id, false)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// 强制重新生成故事记忆（清除所有缓存）
+#[tauri::command]
+pub async fn force_regenerate_story_memory(
+    app: tauri::AppHandle,
+    book_id: String,
+) -> Result<StoryMemoryUpdateResult, String> {
     story_memory_service::update_story_memory(&app, &book_id, true)
         .await
         .map_err(|e| e.to_string())

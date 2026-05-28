@@ -2,6 +2,7 @@ pub mod book_service;
 pub mod ai_service;
 pub mod snapshot_service;
 pub mod summary_service;
+pub mod summary_generator_service;
 pub mod character_service;
 pub mod outline_service;
 pub mod chat_service;

@@ -13,6 +13,7 @@ struct SessionState {
     messages: Vec<ChatMessage>,
     round_count: u32,
     compressed_context: String,
+    waiting_for_user: bool, // 是否正在等待用户答复（ask_user工具）
 }
 
 /// 全局会话状态管理
@@ -205,7 +206,7 @@ fn build_tools() -> Vec<ToolDef> {
             def_type: "function".into(),
             function: FunctionDef {
                 name: "report_conflict".into(),
-                description: "报告一个确认后的设定冲突。必须已查原文核实过再报告，空章节不算。每个冲突单独调用".into(),
+                description: "报告一个确认后的设定冲突。必须已查原文核实过再报告。每个冲突只报告一次，不要重复报告已经讨论过的冲突。用户正在修复冲突时不要调用此工具".into(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -214,6 +215,57 @@ fn build_tools() -> Vec<ToolDef> {
                         "severity": {"type": "string", "description": "严重程度：high/medium/low"}
                     },
                     "required": ["description", "suggestion", "severity"]
+                }),
+            },
+        },
+        ToolDef {
+            def_type: "function".into(),
+            function: FunctionDef {
+                name: "propose_line_edit".into(),
+                description: "提议修改指定章节的某一行内容。调用后前端会展示确认卡片，用户确认后才真正修改".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "chapterId": {"type": "string", "description": "章节ID"},
+                        "lineNumber": {"type": "integer", "description": "行号（1开始）"},
+                        "originalText": {"type": "string", "description": "原文内容"},
+                        "newText": {"type": "string", "description": "修改后的内容"},
+                        "reason": {"type": "string", "description": "修改理由"}
+                    },
+                    "required": ["chapterId", "lineNumber", "originalText", "newText"]
+                }),
+            },
+        },
+        ToolDef {
+            def_type: "function".into(),
+            function: FunctionDef {
+                name: "get_volume_outline".into(),
+                description: "获取指定卷的粗纲或细纲".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "bookId": {"type": "string", "description": "书籍ID"},
+                        "volumeId": {"type": "string", "description": "卷ID"},
+                        "outlineType": {"type": "string", "description": "coarse(粗纲) 或 fine(细纲)，默认coarse"}
+                    },
+                    "required": ["bookId", "volumeId"]
+                }),
+            },
+        },
+        ToolDef {
+            def_type: "function".into(),
+            function: FunctionDef {
+                name: "create_chapter".into(),
+                description: "创建新章节。如果不指定volumeId则使用最后一卷，不指定order则自动计算，不指定title则自动生成".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "bookId": {"type": "string", "description": "书籍ID"},
+                        "volumeId": {"type": "string", "description": "卷ID（可选）"},
+                        "title": {"type": "string", "description": "章节标题（可选）"},
+                        "order": {"type": "integer", "description": "排序号（可选）"}
+                    },
+                    "required": ["bookId"]
                 }),
             },
         },
@@ -244,6 +296,22 @@ fn build_tools() -> Vec<ToolDef> {
                         "instruction": {"type": "string", "description": "用户原始需求（如'续写第6章'）"}
                     },
                     "required": ["chapterId", "description"]
+                }),
+            },
+        },
+        ToolDef {
+            def_type: "function".into(),
+            function: FunctionDef {
+                name: "ask_user".into(),
+                description: "当信息不足或需要用户做选择时，向用户提问并等待答复。调用后对话会暂停，直到用户答复后才继续".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "question": {"type": "string", "description": "问题内容"},
+                        "context": {"type": "string", "description": "上下文说明（可选）"},
+                        "options": {"type": "array", "items": {"type": "string"}, "description": "选项列表（可选，不提供则用户自由输入）"}
+                    },
+                    "required": ["question"]
                 }),
             },
         },
@@ -306,7 +374,20 @@ impl AgentOrchestrator {
             messages: vec![],
             round_count: 0,
             compressed_context: String::new(),
+            waiting_for_user: false,
         });
+
+        // 如果正在等待用户答复，检查是否是恢复对话
+        if state.waiting_for_user {
+            log::info!("[Agent] 恢复对话，用户答复: {}", user_message);
+            state.waiting_for_user = false;
+            // 将用户答复添加到消息历史
+            state.messages.push(ChatMessage::new("user", user_message));
+            set_session_state(session_id.to_string(), state.clone());
+        } else {
+            // 正常的新消息
+            state.messages.push(ChatMessage::new("user", user_message));
+        }
 
         // 构建 system prompt（每次都刷新，确保 CHAPTER_LIST 最新）
         let chapter_list = Self::get_chapter_list(book_id).await.unwrap_or_default();
@@ -334,8 +415,10 @@ impl AgentOrchestrator {
             }
         }
 
-        state.messages.push(ChatMessage::new("user", user_message));
-        state.round_count += 1;
+        // 如果不是恢复对话（已经添加了用户消息），则增加轮次
+        if !state.waiting_for_user {
+            state.round_count += 1;
+        }
 
         let tools = build_tools();
         let max_rounds = config.max_rounds.max(3) as usize;
@@ -366,6 +449,8 @@ impl AgentOrchestrator {
                 let mut last_tool_name = String::new();
                 // 收集工具调用摘要（用于持久化到数据库，恢复历史时显示）
                 let mut tool_call_summary: Vec<serde_json::Value> = Vec::new();
+                // 暂存冲突报告，在所有工具调用完成后再发送事件
+                let mut pending_conflicts: Vec<(String, String, String, String)> = Vec::new(); // (conflict_id, desc, sug, sev)
 
                 for tc in tool_calls {
                     let tool_name = &tc.function.name;
@@ -377,14 +462,38 @@ impl AgentOrchestrator {
                     Self::emit_tool_event(app, session_id, tool_name, Some(args.clone())).await;
 
                     // 收集工具摘要数据（前端恢复历史时用 buildToolDisplayText 重建显示文本）
-                    tool_call_summary.push(serde_json::json!({
+                    // 保存所有可能的参数，让前端能正确显示工具调用详情
+                    let mut summary = serde_json::json!({
                         "name": tool_name,
                         "chapterId": args.get("chapterId").and_then(|v| v.as_str()).unwrap_or(""),
                         "outlineType": args.get("outlineType").and_then(|v| v.as_str()).unwrap_or(""),
                         "description": args.get("description").and_then(|v| v.as_str()).unwrap_or(""),
                         "startLine": args.get("startLine").and_then(|v| v.as_i64()).unwrap_or(0),
                         "endLine": args.get("endLine").and_then(|v| v.as_i64()).unwrap_or(0),
-                    }));
+                    });
+                    // 添加其他可能用到的参数
+                    if let Some(keyword) = args.get("keyword").and_then(|v| v.as_str()) {
+                        summary["keyword"] = serde_json::json!(keyword);
+                    }
+                    if let Some(regex) = args.get("regex").and_then(|v| v.as_bool()) {
+                        summary["regex"] = serde_json::json!(regex);
+                    }
+                    if let Some(name) = args.get("name").and_then(|v| v.as_str()) {
+                        summary["name"] = serde_json::json!(name);
+                    }
+                    if let Some(line_number) = args.get("lineNumber").and_then(|v| v.as_i64()) {
+                        summary["lineNumber"] = serde_json::json!(line_number);
+                    }
+                    if let Some(original_text) = args.get("originalText").and_then(|v| v.as_str()) {
+                        summary["originalText"] = serde_json::json!(original_text);
+                    }
+                    if let Some(new_text) = args.get("newText").and_then(|v| v.as_str()) {
+                        summary["newText"] = serde_json::json!(new_text);
+                    }
+                    if let Some(reason) = args.get("reason").and_then(|v| v.as_str()) {
+                        summary["reason"] = serde_json::json!(reason);
+                    }
+                    tool_call_summary.push(summary);
 
                     // save_outline / write_chapter 特殊处理：不真保存，发事件给前端渲染带按钮的卡片
                     let result = if tool_name == "save_outline" {
@@ -413,30 +522,24 @@ impl AgentOrchestrator {
                             format!("跳过无效报告: {}", desc)
                         } else {
                             // 保存到数据库
-                        let conflict_id = format!("conflict_{}", uuid::Uuid::new_v4().to_string().replace('-', "_"));
-                        let now = chrono::Utc::now().timestamp();
-                        if let Ok(pool) = crate::db::get_pool().await {
-                            let _ = sqlx::query(
-                                "INSERT INTO detected_conflicts (id, book_id, description, suggestion, detected_at, is_ignored)
-                                 VALUES (?1, ?2, ?3, ?4, ?5, 0)"
-                            )
-                            .bind(&conflict_id)
-                            .bind(book_id)
-                            .bind(desc)
-                            .bind(sug)
-                            .bind(now)
-                            .execute(pool)
-                            .await;
-                        }
-                        let _ = app.emit("ai-conflict-result", serde_json::json!({
-                            "sessionId": session_id,
-                            "bookId": book_id,
-                            "conflictId": conflict_id,
-                            "description": desc,
-                            "suggestion": sug,
-                            "severity": sev,
-                        }));
-                        format!("冲突已记录: {}", desc)
+                            let conflict_id = format!("conflict_{}", uuid::Uuid::new_v4().to_string().replace('-', "_"));
+                            let now = chrono::Utc::now().timestamp();
+                            if let Ok(pool) = crate::db::get_pool().await {
+                                let _ = sqlx::query(
+                                    "INSERT INTO detected_conflicts (id, book_id, description, suggestion, detected_at, is_ignored)
+                                     VALUES (?1, ?2, ?3, ?4, ?5, 0)"
+                                )
+                                .bind(&conflict_id)
+                                .bind(book_id)
+                                .bind(desc)
+                                .bind(sug)
+                                .bind(now)
+                                .execute(pool)
+                                .await;
+                            }
+                            // 暂存冲突报告，在所有工具调用完成后再发送事件
+                            pending_conflicts.push((conflict_id, desc.to_string(), sug.to_string(), sev.to_string()));
+                            format!("冲突已记录: {}", desc)
                         }
                     } else if tool_name == "write_chapter" {
                         let ch_id = args.get("chapterId").and_then(|v| v.as_str()).unwrap_or("");
@@ -485,7 +588,99 @@ impl AgentOrchestrator {
                                 format!("写作失败: {}", e)
                             }
                         }
+                    } else if tool_name == "propose_line_edit" {
+                        let ch_id = args.get("chapterId").and_then(|v| v.as_str()).unwrap_or("");
+                        let line_number = args.get("lineNumber").and_then(|v| v.as_i64()).unwrap_or(0);
+                        let original_text = args.get("originalText").and_then(|v| v.as_str()).unwrap_or("");
+                        let new_text = args.get("newText").and_then(|v| v.as_str()).unwrap_or("");
+                        let reason = args.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+
+                        // 保存到数据库并获取消息ID
+                        let message_id = format!("line_edit_{}_{}", chrono::Utc::now().timestamp_millis(), rand::random::<u16>());
+                        if let Ok(pool) = crate::db::get_pool().await {
+                            let _ = sqlx::query(
+                                "INSERT INTO chat_messages (id, session_id, book_id, chapter_id, role, content, timestamp) VALUES (?1, ?2, ?3, ?4, 'line_edit', ?5, ?6)"
+                            )
+                            .bind(&message_id)
+                            .bind(session_id)
+                            .bind(book_id)
+                            .bind(ch_id)
+                            .bind(serde_json::json!({
+                                "chapterId": ch_id,
+                                "lineNumber": line_number,
+                                "originalText": original_text,
+                                "newText": new_text,
+                                "reason": reason,
+                                "handled": false
+                            }).to_string())
+                            .bind(chrono::Utc::now().timestamp_millis())
+                            .execute(pool)
+                            .await;
+                        }
+
+                        // 发送事件给前端显示
+                        let _ = app.emit("ai-line-edit-result", serde_json::json!({
+                            "sessionId": session_id,
+                            "bookId": book_id,
+                            "messageId": message_id,
+                            "chapterId": ch_id,
+                            "lineNumber": line_number,
+                            "originalText": original_text,
+                            "newText": new_text,
+                            "reason": reason,
+                        }));
+                        format!("行编辑提议已展示给用户：第{}行", line_number)
+                    } else if tool_name == "ask_user" {
+                        let question = args.get("question").and_then(|v| v.as_str()).unwrap_or("");
+                        let context = args.get("context").and_then(|v| v.as_str()).unwrap_or("");
+                        let options = args.get("options").and_then(|v| v.as_array())
+                            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect::<Vec<_>>())
+                            .unwrap_or_default();
+
+                        // 保存到数据库
+                        let message_id = format!("ask_user_{}_{}", chrono::Utc::now().timestamp_millis(), rand::random::<u16>());
+                        if let Ok(pool) = crate::db::get_pool().await {
+                            let _ = sqlx::query(
+                                "INSERT INTO chat_messages (id, session_id, book_id, chapter_id, role, content, timestamp) VALUES (?1, ?2, ?3, ?4, 'ask_user', ?5, ?6)"
+                            )
+                            .bind(&message_id)
+                            .bind(session_id)
+                            .bind(book_id)
+                            .bind("")
+                            .bind(serde_json::json!({
+                                "question": question,
+                                "context": context,
+                                "options": options,
+                                "handled": false
+                            }).to_string())
+                            .bind(chrono::Utc::now().timestamp_millis())
+                            .execute(pool)
+                            .await;
+                        }
+
+                        // 发送事件给前端显示
+                        let _ = app.emit("ai-ask-user-result", serde_json::json!({
+                            "sessionId": session_id,
+                            "bookId": book_id,
+                            "messageId": message_id,
+                            "question": question,
+                            "context": context,
+                            "options": options,
+                        }));
+                        format!("询问用户：{}", question)
                     } else {
+                        // 自动注入 bookId：当工具需要 bookId 且 AI 未传入时，使用当前 bookId
+                        let mut args = args.clone();
+                        let has_book_id = args.get("bookId").and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false);
+                        if !has_book_id {
+                            let needs_book_id = matches!(tool_name.as_str(),
+                                "search_chapter_content" | "list_all_chapters" | "list_character_cards"
+                                | "create_chapter" | "learn_writing_style"
+                            );
+                            if needs_book_id {
+                                args["bookId"] = serde_json::json!(book_id);
+                            }
+                        }
                         execute_tool_call(&ToolCall {
                             name: tool_name.clone(),
                             arguments: args,
@@ -511,11 +706,34 @@ impl AgentOrchestrator {
                     "sessionId": session_id,
                 }));
 
+                // 检查是否包含 ask_user 工具
+                let has_ask_user = tool_calls.iter().any(|tc| tc.function.name == "ask_user");
+
                 // 持久化工具调用摘要（恢复历史时显示，不含工具返回的长数据）
                 if let Err(e) = crate::services::chat_service::save_tool_call_summary(
                     session_id, book_id, &serde_json::to_string(&tool_call_summary).unwrap_or_default(),
                 ).await {
                     log::error!("[Agent] 保存工具调用摘要失败: {}", e);
+                }
+
+                // 在所有工具调用完成后，发送暂存的冲突报告事件
+                for (conflict_id, desc, sug, sev) in pending_conflicts {
+                    let _ = app.emit("ai-conflict-result", serde_json::json!({
+                        "sessionId": session_id,
+                        "bookId": book_id,
+                        "conflictId": conflict_id,
+                        "description": desc,
+                        "suggestion": sug,
+                        "severity": sev,
+                    }));
+                }
+
+                // 如果包含 ask_user 工具，保存状态并暂停等待用户答复
+                if has_ask_user {
+                    log::info!("[Agent] 检测到 ask_user 工具，暂停等待用户答复");
+                    state.waiting_for_user = true;
+                    set_session_state(session_id.to_string(), state.clone());
+                    return Ok(());
                 }
 
                 log::info!("[Agent] 工具执行完成，继续决策");
@@ -886,6 +1104,10 @@ impl AgentOrchestrator {
             "report_conflict" => "报告设定冲突",
             "write_chapter" => "创作正文",
             "learn_writing_style" => "学习写作风格",
+            "propose_line_edit" => "提议行编辑",
+            "get_volume_outline" => "获取卷大纲",
+            "create_chapter" => "创建章节",
+            "ask_user" => "询问用户",
             _ => tool_name,
         };
 

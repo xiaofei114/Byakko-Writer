@@ -1,7 +1,7 @@
 use crate::db::get_pool;
 use crate::models::{AIChatMessage, AIConfig};
 use sqlx::Row;
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 
 /// 保存用户消息
 pub async fn save_user_message(
@@ -88,6 +88,25 @@ pub async fn save_tool_call_summary(
     Ok(message_id)
 }
 
+/// 更新单行修改消息处理状态
+pub async fn update_line_edit_handled_status(message_id: &str, handled_status: &str) -> anyhow::Result<()> {
+    let pool = get_pool().await?;
+
+    sqlx::query(
+        r#"
+        UPDATE chat_messages
+        SET handled_status = ?1
+        WHERE id = ?2
+        "#
+    )
+    .bind(handled_status)
+    .bind(message_id)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 /// 获取或创建会话
 async fn get_or_create_session(
     session_id: Option<String>,
@@ -151,6 +170,14 @@ pub async fn send_chat_message_stream(
 
     save_user_message(&session_id, &book_id, chapter_id.as_deref(), &message).await?;
 
+    let _ = app.emit("ai-chat-stream", serde_json::json!({
+        "sessionId": session_id,
+        "chunk": "",
+        "isComplete": false,
+        "isToolCall": false,
+        "sessionStarted": true,
+    }));
+
     // 使用新的Agent架构处理对话
     crate::services::agent_orchestrator::AgentOrchestrator::process_chat(
         &app,
@@ -207,7 +234,7 @@ pub async fn get_chat_history(
 
     let rows = sqlx::query(
         r#"
-        SELECT id, session_id, book_id, chapter_id, role, content, context_type, timestamp, polish_handled
+        SELECT id, session_id, book_id, chapter_id, role, content, context_type, timestamp, polish_handled, handled_status
         FROM chat_messages
         WHERE session_id = ?1
         ORDER BY timestamp ASC
@@ -231,6 +258,7 @@ pub async fn get_chat_history(
             context_type: row.try_get("context_type")?,
             timestamp: row.try_get("timestamp")?,
             polish_handled: row.try_get("polish_handled").unwrap_or(0),
+            handled_status: row.try_get("handled_status").ok(),
         });
     }
 

@@ -61,8 +61,13 @@ pub async fn load_book(book_id: String) -> anyhow::Result<Book> {
         "SELECT id, title, author, description, current_chapter_id, created_at, updated_at FROM books WHERE id = ?1"
     )
     .bind(&book_id)
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await?;
+    
+    let book_row = match book_row {
+        Some(row) => row,
+        None => return Err(anyhow::anyhow!("书籍 {} 不存在", book_id)),
+    };
     
     // 加载卷
     let volumes: Vec<Volume> = sqlx::query_as::<_, Volume>(
@@ -199,7 +204,7 @@ pub async fn create_chapter(
     let pool = get_pool().await?;
     let now = chrono::Local::now().timestamp_millis();
     let chapter_id = format!("chapter_{}", now);
-    
+
     // 获取当前最大 order
     let max_order: Option<i32> = sqlx::query_scalar(
         r#"SELECT MAX("order") FROM chapters WHERE volume_id = ?1"#
@@ -207,9 +212,9 @@ pub async fn create_chapter(
     .bind(&volume_id)
     .fetch_one(pool)
     .await?;
-    
+
     let order = max_order.unwrap_or(-1) + 1;
-    
+
     sqlx::query(
         r#"
         INSERT INTO chapters (id, book_id, volume_id, title, "order", content, word_count, created_at, updated_at)
@@ -224,7 +229,45 @@ pub async fn create_chapter(
     .bind(now)
     .execute(pool)
     .await?;
-    
+
+    Ok(Chapter {
+        id: chapter_id,
+        title,
+        order,
+        volume_id,
+        content: String::new(),
+        word_count: 0,
+        created_at: now,
+        updated_at: now,
+    })
+}
+
+/// 创建章节（指定order）- 用于AI工具调用
+pub async fn create_chapter_with_order(
+    book_id: String,
+    title: String,
+    volume_id: String,
+    order: i32,
+) -> anyhow::Result<Chapter> {
+    let pool = get_pool().await?;
+    let now = chrono::Local::now().timestamp_millis();
+    let chapter_id = format!("chapter_{}", now);
+
+    sqlx::query(
+        r#"
+        INSERT INTO chapters (id, book_id, volume_id, title, "order", content, word_count, created_at, updated_at)
+        VALUES (?1, ?2, ?3, ?4, ?5, '', 0, ?6, ?6)
+        "#
+    )
+    .bind(&chapter_id)
+    .bind(&book_id)
+    .bind(&volume_id)
+    .bind(&title)
+    .bind(order)
+    .bind(now)
+    .execute(pool)
+    .await?;
+
     Ok(Chapter {
         id: chapter_id,
         title,

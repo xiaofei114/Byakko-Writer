@@ -47,6 +47,7 @@ export interface AppConfig {
   lineHeight: number;
   autoSave: boolean;
   autoSaveInterval: number;
+  autoStoryMemory: boolean;
   ai: AIConfig;
 }
 
@@ -99,6 +100,11 @@ export interface ChapterSummary {
   characters: string[];
   locations: string[];
   events: string[];
+  // 新增增强字段
+  plotProgression?: string;      // 剧情推进点
+  emotionalBeats: string[];      // 情感节点
+  foreshadowing: string[];       // 伏笔
+  unresolvedThreads: string[];   // 未解决线索
   generatedAt: number;
   isConfirmed: boolean;
 }
@@ -110,13 +116,15 @@ export interface AIChatMessage {
   bookId: string;
   chapterId?: string;
   sessionId: string;
-  role: 'user' | 'assistant' | 'system' | 'tool' | 'outline' | 'write' | 'conflict';
+  role: 'user' | 'assistant' | 'system' | 'tool' | 'outline' | 'write' | 'conflict' | 'line_edit' | 'ask_user';
   content: string;
   contextType?: 'normal' | 'rag' | 'summary';
   timestamp: number;
   toolName?: string;
   toolStatus?: 'calling' | 'success' | 'error';
   polishHandled?: boolean; // 润色是否已处理（应用或取消）
+  isHandled?: boolean; // 是否已处理（用于line_edit和ask_user）
+  handledStatus?: string; // 持久化处理状态（从DB的handled_status列）
 }
 
 export interface ChatSession {

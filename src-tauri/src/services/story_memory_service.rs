@@ -4,10 +4,12 @@ use crate::models::{
     StoryMemoryUpdateResult, GroupProgress,
 };
 use crate::services::ai_service::call_ai_for_large_summary;
+use crate::services::summary_generator_service::generate_chapter_summary_for_story_bible;
 use sqlx::Row;
 use tauri::AppHandle;
 
 const GROUP_SIZE: i32 = 10;
+const MIN_CHAPTER_WORDS: i64 = 100; // 非空白章节的最小字数
 
 /// 从 DB 读取故事记忆
 pub async fn get_story_memory(book_id: &str) -> anyhow::Result<Option<StoryMemory>> {
@@ -150,40 +152,6 @@ fn format_story_memory(m: &StoryMemory) -> String {
     text
 }
 
-pub async fn get_story_bible_for_prompt(book_id: &str) -> String {
-    match build_story_memory_text(book_id).await {
-        Ok(text) if !text.is_empty() => {
-            log::info!("[StoryBible] 使用 Story Bible，长度: {} 字", text.chars().count());
-            text
-        }
-        _ => {
-            log::info!("[StoryBible] Story Bible 不存在，使用卷分组章节列表作为 fallback");
-            get_chapter_list_by_volume(book_id).await.unwrap_or_default()
-        }
-    }
-}
-
-async fn get_chapter_list_by_volume(book_id: &str) -> anyhow::Result<String> {
-    let book = crate::services::book_service::load_book(book_id.to_string()).await?;
-
-    if book.chapters.is_empty() {
-        return Ok("当前书籍没有章节".to_string());
-    }
-
-    let mut result = String::from("【章节列表】\n");
-    for volume in &book.volumes {
-        result.push_str(&format!("\n## {}\n", volume.title));
-        let vol_chapters: Vec<_> = book.chapters.iter()
-            .filter(|c| c.volume_id == volume.id)
-            .collect();
-        for (i, ch) in vol_chapters.iter().enumerate() {
-            result.push_str(&format!("{}. {} (ID: {})\n", i + 1, ch.title, ch.id));
-        }
-    }
-
-    Ok(result)
-}
-
 pub async fn get_chapters_in_volume(book_id: &str, volume_id: &str) -> anyhow::Result<String> {
     let book = crate::services::book_service::load_book(book_id.to_string()).await?;
 
@@ -268,20 +236,24 @@ pub async fn check_should_update_story_memory(book_id: &str) -> anyhow::Result<b
 pub async fn update_story_memory_auto(
     book_id: &str,
 ) -> anyhow::Result<StoryMemoryUpdateResult> {
-    update_story_memory_inner(book_id).await
+    update_story_memory_inner(book_id, false).await
 }
 
 pub async fn update_story_memory(
     _app: &AppHandle,
     book_id: &str,
-    _force: bool,
+    force: bool,
 ) -> anyhow::Result<StoryMemoryUpdateResult> {
-    update_story_memory_inner(book_id).await
+    update_story_memory_inner(book_id, force).await
 }
 
-/// 核心：分组并行生成摘要，最后汇总生成 Story Bible
+/// 核心：三步流程生成 Story Bible
+/// 第一步：为所有无摘要的非空白章节生成摘要（force=true时重新生成所有）
+/// 第二步：每10章分组，并行生成分组总结（force=true时清除缓存重新生成）
+/// 第三步：汇总所有分组，生成最终 Story Bible
 async fn update_story_memory_inner(
     book_id: &str,
+    force: bool,
 ) -> anyhow::Result<StoryMemoryUpdateResult> {
     let config = crate::services::config_service::load_config()?.ai;
 
@@ -298,27 +270,44 @@ async fn update_story_memory_inner(
         });
     }
 
-    // 1. 将章节分成 10 章一组
-    let groups = split_into_groups(&book);
-
-    // 2. 并发处理每个分组（缓存命中则跳过，否则调 AI）
-    log::info!("[StoryBible] 开始并行处理 {} 个分组...", groups.len());
     let start_time = std::time::Instant::now();
+
+    // ========== 第一步：确保所有非空白章节都有摘要 ==========
+    log::info!("[StoryBible] 第一步：检查并生成{}章节摘要...", if force { "所有（强制模式）" } else { "缺失的" });
+    let summary_result = if force {
+        regenerate_all_chapter_summaries(book_id, &book, &config).await?
+    } else {
+        ensure_all_chapter_summaries(book_id, &book, &config).await?
+    };
+    log::info!("[StoryBible] 章节摘要处理完成：{} 个已存在，{} 个新生成，{} 个失败",
+        summary_result.existing, summary_result.generated, summary_result.failed);
+
+    // ========== 第二步：将章节分成 10 章一组，并行处理 ==========
+    let groups = split_into_groups(&book);
+    log::info!("[StoryBible] 第二步：开始并行处理 {} 个分组{}...", groups.len(), if force { "（强制模式，清除缓存）" } else { "" });
+
+    // 强制模式：清除该书的缓存
+    if force {
+        if let Err(e) = clear_group_cache(book_id).await {
+            log::warn!("[StoryBible] 清除缓存失败: {}", e);
+        } else {
+            log::info!("[StoryBible] 已清除分组缓存");
+        }
+    }
 
     let (group_summaries, progress_list) = process_groups_parallel(book_id, &groups, &config).await;
 
-    let elapsed = start_time.elapsed();
-    log::info!("[StoryBible] 分组处理完成，耗时 {:?}，{} 个缓存，{} 个新生成",
-        elapsed,
-        progress_list.iter().filter(|p| p.status == "cached").count(),
-        progress_list.iter().filter(|p| p.status == "generated").count(),
-    );
+    let groups_cached = progress_list.iter().filter(|p| p.status == "cached").count() as i32;
+    let groups_generated = progress_list.iter().filter(|p| p.status == "generated").count() as i32;
+    log::info!("[StoryBible] 分组处理完成：{} 个缓存命中，{} 个新生成",
+        groups_cached, groups_generated);
 
-    // 3. 汇总所有分组摘要，生成最终 Story Bible
+    // ========== 第三步：汇总所有分组摘要，生成最终 Story Bible ==========
+    log::info!("[StoryBible] 第三步：生成最终 Story Bible...");
     let volume_text = build_volume_structure_text(&book);
     let group_combined: String = group_summaries.iter()
         .enumerate()
-        .map(|(i, s)| format!("## 第{}组（第{}-{}章）\n{}\n", i + 1,
+        .map(|(i, s)| format!("## 第{}组（第{}-{}章）\n{}", i + 1,
             groups[i].start_chapter, groups[i].end_chapter, s))
         .collect();
 
@@ -349,21 +338,23 @@ async fn update_story_memory_inner(
     // 如果 JSON 被截断，尝试修复
     let response = repair_truncated_json(&response);
 
+    let elapsed = start_time.elapsed();
+
     match parse_story_memory_json(book_id, &response) {
         Ok(mut memory) => {
             memory.last_chapter_count = chapter_count as i64;
             memory.last_word_count = total_word_count;
             save_story_memory(&memory).await?;
 
-            let groups_cached = progress_list.iter().filter(|p| p.status == "cached").count() as i32;
-            let groups_generated = progress_list.iter().filter(|p| p.status == "generated").count() as i32;
-
-            log::info!("[StoryBible] 大总结完成，{} 章，{} 字", chapter_count, total_word_count);
+            log::info!("[StoryBible] Story Bible 生成完成，{} 章，{} 字，总耗时 {:.1}s",
+                chapter_count, total_word_count, elapsed.as_secs_f32());
             Ok(StoryMemoryUpdateResult {
                 success: true,
                 message: format!(
-                    "故事记忆已更新（{} 章，{} 字）。{} 组复用缓存，{} 组重新生成，总耗时 {:.1}s",
-                    chapter_count, total_word_count, groups_cached, groups_generated, elapsed.as_secs_f32()
+                    "Story Bible 已更新（{} 章，{} 字）。章节摘要：{} 个已存在/{} 个新生成/{} 个失败；分组：{} 个缓存/{} 个新生成。总耗时 {:.1}s",
+                    chapter_count, total_word_count,
+                    summary_result.existing, summary_result.generated, summary_result.failed,
+                    groups_cached, groups_generated, elapsed.as_secs_f32()
                 ),
                 chapter_count, total_word_count,
                 groups: progress_list,
@@ -383,6 +374,169 @@ async fn update_story_memory_inner(
             })
         }
     }
+}
+
+/// 章节摘要处理结果
+struct SummaryGenerationResult {
+    existing: usize,
+    generated: usize,
+    failed: usize,
+}
+
+/// 第一步：确保所有非空白章节都有摘要
+/// - 检查哪些章节没有摘要
+/// - 使用 summary_generator_service 批量生成
+async fn ensure_all_chapter_summaries(
+    book_id: &str,
+    book: &crate::models::Book,
+    config: &crate::models::AIConfig,
+) -> anyhow::Result<SummaryGenerationResult> {
+    let pool = get_pool().await?;
+    let mut existing = 0;
+    let mut to_generate = Vec::new();
+
+    // 检查每个非空白章节的摘要状态
+    for chapter in &book.chapters {
+        // 跳过空白章节（字数太少）
+        if chapter.word_count < MIN_CHAPTER_WORDS {
+            continue;
+        }
+
+        let has_summary: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM chapter_summaries WHERE chapter_id = ?1"
+        )
+        .bind(&chapter.id)
+        .fetch_optional(pool)
+        .await?;
+
+        if has_summary.is_some() {
+            existing += 1;
+        } else {
+            to_generate.push((chapter.id.clone(), chapter.title.clone()));
+        }
+    }
+
+    if to_generate.is_empty() {
+        log::info!("[StoryBible] 所有 {} 个非空白章节已有摘要", existing);
+        return Ok(SummaryGenerationResult { existing, generated: 0, failed: 0 });
+    }
+
+    log::info!("[StoryBible] 需要为 {} 个章节生成摘要（{} 个已存在）", to_generate.len(), existing);
+
+    // 并行生成摘要
+    let mut tasks = Vec::new();
+    for (chapter_id, title) in to_generate {
+        let book_id = book_id.to_string();
+        let chapter_id_clone = chapter_id.clone();
+        let title_clone = title.clone();
+        let config = config.clone();
+        tasks.push(tokio::spawn(async move {
+            match generate_chapter_summary_for_story_bible(&book_id, &chapter_id_clone, &title_clone, &config).await {
+                Ok(_) => {
+                    log::info!("[StoryBible] 章节 '{}' 摘要生成成功", title_clone);
+                    true
+                }
+                Err(e) => {
+                    log::error!("[StoryBible] 章节 '{}' 摘要生成失败: {}", title_clone, e);
+                    false
+                }
+            }
+        }));
+    }
+
+    let results = futures::future::join_all(tasks).await;
+    let generated = results.iter().filter(|r| r.as_ref().map(|s| *s).unwrap_or(false)).count();
+    let failed = results.len() - generated;
+
+    Ok(SummaryGenerationResult { existing, generated, failed })
+}
+
+/// 强制重新生成所有非空白章节的摘要
+async fn regenerate_all_chapter_summaries(
+    book_id: &str,
+    book: &crate::models::Book,
+    config: &crate::models::AIConfig,
+) -> anyhow::Result<SummaryGenerationResult> {
+    let mut to_generate = Vec::new();
+
+    // 收集所有非空白章节
+    for chapter in &book.chapters {
+        if chapter.word_count >= MIN_CHAPTER_WORDS {
+            to_generate.push((chapter.id.clone(), chapter.title.clone()));
+        }
+    }
+
+    if to_generate.is_empty() {
+        log::info!("[StoryBible] 没有需要生成摘要的非空白章节");
+        return Ok(SummaryGenerationResult { existing: 0, generated: 0, failed: 0 });
+    }
+
+    log::info!("[StoryBible] 强制模式：重新生成 {} 个章节的摘要", to_generate.len());
+
+    // 先清除该书的现有摘要
+    if let Err(e) = clear_chapter_summaries(book_id).await {
+        log::warn!("[StoryBible] 清除现有摘要失败: {}", e);
+    } else {
+        log::info!("[StoryBible] 已清除现有章节摘要");
+    }
+
+    // 并行重新生成摘要
+    let mut tasks = Vec::new();
+    for (chapter_id, title) in to_generate {
+        let book_id = book_id.to_string();
+        let chapter_id_clone = chapter_id.clone();
+        let title_clone = title.clone();
+        let config = config.clone();
+        tasks.push(tokio::spawn(async move {
+            match generate_chapter_summary_for_story_bible(&book_id, &chapter_id_clone, &title_clone, &config).await {
+                Ok(_) => {
+                    log::info!("[StoryBible] 章节 '{}' 摘要重新生成成功", title_clone);
+                    true
+                }
+                Err(e) => {
+                    log::error!("[StoryBible] 章节 '{}' 摘要重新生成失败: {}", title_clone, e);
+                    false
+                }
+            }
+        }));
+    }
+
+    let results = futures::future::join_all(tasks).await;
+    let generated = results.iter().filter(|r| r.as_ref().map(|s| *s).unwrap_or(false)).count();
+    let failed = results.len() - generated;
+
+    Ok(SummaryGenerationResult { existing: 0, generated, failed })
+}
+
+/// 清除该书的章节摘要
+async fn clear_chapter_summaries(book_id: &str) -> anyhow::Result<()> {
+    let pool = get_pool().await?;
+    
+    sqlx::query(
+        r#"
+        DELETE FROM chapter_summaries 
+        WHERE chapter_id IN (
+            SELECT id FROM chapters WHERE book_id = ?1
+        )
+        "#
+    )
+    .bind(book_id)
+    .execute(pool)
+    .await?;
+    
+    Ok(())
+}
+
+/// 清除该书的分组缓存
+async fn clear_group_cache(book_id: &str) -> anyhow::Result<()> {
+    let pool = get_pool().await?;
+    
+    sqlx::query("DELETE FROM story_memory_groups WHERE book_id = ?1")
+        .bind(book_id)
+        .execute(pool)
+        .await?;
+    
+    Ok(())
 }
 
 /// 章节分组
@@ -646,7 +800,7 @@ fn extract_group_summary(json_str: &str) -> String {
     json_str.to_string()
 }
 
-/// 从 DB 填充章节摘要信息
+/// 从 DB 填充章节摘要信息（使用增强摘要格式）
 async fn fill_chapter_summaries(_book_id: &str, chapters: &[ChapterInfo]) -> Vec<ChapterInfo> {
     let pool = match get_pool().await {
         Ok(p) => p,
@@ -658,7 +812,10 @@ async fn fill_chapter_summaries(_book_id: &str, chapters: &[ChapterInfo]) -> Vec
         let mut info = ch.clone();
 
         if let Ok(Some(row)) = sqlx::query(
-            "SELECT short_summary, long_summary, events FROM chapter_summaries WHERE chapter_id = ?1"
+            r#"SELECT 
+                short_summary, long_summary, tags, characters, locations, events,
+                plot_progression, emotional_beats, foreshadowing, unresolved_threads
+            FROM chapter_summaries WHERE chapter_id = ?1"#
         )
         .bind(&ch.id)
         .fetch_optional(pool)
@@ -666,7 +823,58 @@ async fn fill_chapter_summaries(_book_id: &str, chapters: &[ChapterInfo]) -> Vec
         {
             info.short_summary = row.try_get::<String, _>("short_summary").unwrap_or_default();
             info.long_summary = row.try_get::<String, _>("long_summary").unwrap_or_default();
-            info.events = row.try_get::<String, _>("events").unwrap_or_default();
+
+            // 构建增强的 events 信息
+            let mut events_parts = Vec::new();
+
+            // 基础事件
+            if let Ok(events_json) = row.try_get::<String, _>("events") {
+                if let Ok(events) = serde_json::from_str::<Vec<String>>(&events_json) {
+                    if !events.is_empty() {
+                        events_parts.push(format!("【关键事件】{}", events.join("；")));
+                    }
+                }
+            }
+
+            // 剧情推进点
+            if let Ok(plot) = row.try_get::<String, _>("plot_progression") {
+                if !plot.is_empty() {
+                    events_parts.push(format!("【剧情推进】{}", plot));
+                }
+            }
+
+            // 情感节点
+            if let Ok(emotional_json) = row.try_get::<String, _>("emotional_beats") {
+                if let Ok(beats) = serde_json::from_str::<Vec<String>>(&emotional_json) {
+                    if !beats.is_empty() {
+                        events_parts.push(format!("【情感节点】{}", beats.join("；")));
+                    }
+                }
+            }
+
+            // 伏笔
+            if let Ok(foreshadowing_json) = row.try_get::<String, _>("foreshadowing") {
+                if let Ok(foreshadows) = serde_json::from_str::<Vec<String>>(&foreshadowing_json) {
+                    if !foreshadows.is_empty() {
+                        events_parts.push(format!("【埋下伏笔】{}", foreshadows.join("；")));
+                    }
+                }
+            }
+
+            // 未解决线索
+            if let Ok(unresolved_json) = row.try_get::<String, _>("unresolved_threads") {
+                if let Ok(threads) = serde_json::from_str::<Vec<String>>(&unresolved_json) {
+                    if !threads.is_empty() {
+                        events_parts.push(format!("【未解决线索】{}", threads.join("；")));
+                    }
+                }
+            }
+
+            info.events = if events_parts.is_empty() {
+                String::new()
+            } else {
+                events_parts.join("\n")
+            };
         }
 
         filled.push(info);

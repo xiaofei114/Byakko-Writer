@@ -393,6 +393,85 @@ const handleApplyPolish = (event: CustomEvent<{ originalText: string; polishedTe
   }
 };
 
+// 处理应用行编辑事件
+const handleApplyLineEdit = (event: CustomEvent<{ chapterId: string; lineNumber: number; originalText: string; newText: string }>) => {
+  const { chapterId, originalText, newText } = event.detail;
+
+  // 确保是当前章节
+  if (chapterId !== bookStore.currentChapterId) {
+    ElMessage.warning('当前打开的章节与修改目标不一致');
+    return;
+  }
+
+  if (!editorRef.value) return;
+
+  // 获取编辑器内容
+  const content = htmlToText(editorRef.value.innerHTML);
+  const lines = content.split('\n');
+
+  // 根据原文查找实际行号（不使用AI给的行号，因为可能不准确）
+  const searchText = originalText.trim();
+  let foundIndex = -1;
+
+  // 首先尝试精确匹配
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].trim() === searchText) {
+      foundIndex = i;
+      break;
+    }
+  }
+
+  // 如果精确匹配失败，尝试包含匹配
+  if (foundIndex === -1) {
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].includes(searchText) || searchText.includes(lines[i].trim())) {
+        // 选择相似度最高的行
+        if (lines[i].trim().length > 0) {
+          foundIndex = i;
+          break;
+        }
+      }
+    }
+  }
+
+  if (foundIndex === -1) {
+    ElMessage.error('未找到原文所在行，请手动检查');
+    console.log('查找原文:', searchText);
+    return;
+  }
+
+  const actualLineNumber = foundIndex + 1; // 转换为1-based行号
+
+  // 替换该行
+  lines[foundIndex] = newText;
+  const newContent = lines.join('\n');
+
+  // 更新编辑器
+  editorRef.value.innerHTML = textToHtml(newContent);
+
+  // 更新 store
+  isUpdatingFromEditor = true;
+  bookStore.currentContent = newContent;
+  isUpdatingFromEditor = false;
+
+  // 触发保存
+  saveStatus.value = 'unsaved';
+  bookStore.markAsModified();
+  triggerAutoSave();
+
+  ElMessage.success(`第 ${actualLineNumber} 行已更新`);
+};
+
+// 处理章节内容变化事件（来自AI单行修改）
+const handleChapterContentChanged = (event: CustomEvent) => {
+  const { chapterId } = event.detail;
+  // 如果变化的是当前章节，重新加载内容
+  if (chapterId === bookStore.currentChapterId) {
+    lastLoadedChapterId.value = ''; // 重置缓存，强制重新加载
+    loadContent();
+  }
+};
+
 onMounted(() => {
   loadContent();
   loadSummary();
@@ -402,6 +481,12 @@ onMounted(() => {
   
   // 监听应用润色事件
   window.addEventListener('apply-polish', handleApplyPolish as EventListener);
+
+  // 监听应用行编辑事件
+  window.addEventListener('apply-line-edit', handleApplyLineEdit as EventListener);
+
+  // 监听章节内容变化事件（来自AI单行修改）
+  window.addEventListener('chapter-content-changed', handleChapterContentChanged as EventListener);
 });
 
 onUnmounted(() => {
@@ -414,6 +499,8 @@ onUnmounted(() => {
   // 移除监听
   document.removeEventListener('selectionchange', handleSelectionChange);
   window.removeEventListener('apply-polish', handleApplyPolish as EventListener);
+  window.removeEventListener('apply-line-edit', handleApplyLineEdit as EventListener);
+  window.removeEventListener('chapter-content-changed', handleChapterContentChanged as EventListener);
 });
 </script>
 
@@ -595,6 +682,36 @@ onUnmounted(() => {
           <label class="summary-label">关键事件</label>
           <ul class="event-list">
             <li v-for="event in chapterSummary.events" :key="event">{{ event }}</li>
+          </ul>
+        </div>
+
+        <!-- 新增：剧情推进点 -->
+        <div v-if="chapterSummary.plotProgression" class="summary-card">
+          <label class="summary-label">剧情推进</label>
+          <p class="summary-text">{{ chapterSummary.plotProgression }}</p>
+        </div>
+
+        <!-- 新增：情感节点 -->
+        <div v-if="chapterSummary.emotionalBeats && chapterSummary.emotionalBeats.length > 0" class="summary-card">
+          <label class="summary-label">情感节点</label>
+          <ul class="event-list">
+            <li v-for="beat in chapterSummary.emotionalBeats" :key="beat">{{ beat }}</li>
+          </ul>
+        </div>
+
+        <!-- 新增：伏笔 -->
+        <div v-if="chapterSummary.foreshadowing && chapterSummary.foreshadowing.length > 0" class="summary-card">
+          <label class="summary-label">埋下伏笔</label>
+          <ul class="event-list">
+            <li v-for="item in chapterSummary.foreshadowing" :key="item">{{ item }}</li>
+          </ul>
+        </div>
+
+        <!-- 新增：未解决线索 -->
+        <div v-if="chapterSummary.unresolvedThreads && chapterSummary.unresolvedThreads.length > 0" class="summary-card">
+          <label class="summary-label">未解决线索</label>
+          <ul class="event-list">
+            <li v-for="thread in chapterSummary.unresolvedThreads" :key="thread">{{ thread }}</li>
           </ul>
         </div>
       </div>

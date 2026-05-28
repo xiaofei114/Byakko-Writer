@@ -1,13 +1,109 @@
 use crate::db::get_pool;
-use crate::models::{AIConfig, ChatMessage, ToolDef, FunctionDef, DetectedConflict};
+use crate::models::{
+    AIConfig, ChatMessage, ConflictDetectionStatus, DetectedConflict, FunctionDef, ToolDef,
+};
 use uuid::Uuid;
+
+fn is_invalid_conflict_report(description: &str) -> bool {
+    let lower = description.to_lowercase();
+    description.is_empty()
+        || lower.contains("未检测到")
+        || lower.contains("未发现")
+        || lower.contains("没有冲突")
+        || lower.contains("没有问题")
+        || lower.contains("无需修改")
+        || lower.contains("设定一致")
+}
+
+pub async fn get_conflict_detection_status(
+    book_id: &str,
+) -> anyhow::Result<Option<ConflictDetectionStatus>> {
+    let pool = get_pool().await?;
+    let status = sqlx::query_as::<_, ConflictDetectionStatus>(
+        "SELECT book_id, last_status, last_error_kind, last_error_message, last_error_at, last_auto_checked_at
+         FROM conflict_check_progress WHERE book_id = ?1",
+    )
+    .bind(book_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(status)
+}
+
+pub async fn mark_detection_running(book_id: &str) -> anyhow::Result<()> {
+    let pool = get_pool().await?;
+    sqlx::query(
+        "INSERT INTO conflict_check_progress (book_id, last_status, last_error_kind, last_error_message, last_error_at)
+         VALUES (?1, 'running', NULL, NULL, 0)
+         ON CONFLICT(book_id) DO UPDATE SET
+         last_status = 'running',
+         last_error_kind = NULL,
+         last_error_message = NULL,
+         last_error_at = 0",
+    )
+    .bind(book_id)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+pub async fn mark_detection_failed(
+    book_id: &str,
+    error_kind: &str,
+    error_message: &str,
+) -> anyhow::Result<()> {
+    let pool = get_pool().await?;
+    let now = chrono::Utc::now().timestamp();
+    sqlx::query(
+        "INSERT INTO conflict_check_progress (book_id, last_status, last_error_kind, last_error_message, last_error_at)
+         VALUES (?1, 'failed', ?2, ?3, ?4)
+         ON CONFLICT(book_id) DO UPDATE SET
+         last_status = 'failed',
+         last_error_kind = ?2,
+         last_error_message = ?3,
+         last_error_at = ?4",
+    )
+    .bind(book_id)
+    .bind(error_kind)
+    .bind(error_message)
+    .bind(now)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+async fn save_detected_conflict(
+    book_id: &str,
+    description: &str,
+    suggestion: &str,
+) -> anyhow::Result<()> {
+    let pool = get_pool().await?;
+    let id = format!("conflict_{}", Uuid::new_v4().to_string().replace('-', "_"));
+    let now = chrono::Utc::now().timestamp();
+
+    sqlx::query(
+        "INSERT INTO detected_conflicts (id, book_id, description, suggestion, detected_at, is_ignored)
+         VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+    )
+    .bind(&id)
+    .bind(book_id)
+    .bind(description)
+    .bind(suggestion)
+    .bind(now)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
 
 /// 检查是否需要执行冲突检测（阈值：字数增长20% 或 章节增长3章）
 pub async fn check_should_detect(book_id: &str) -> anyhow::Result<bool> {
     let pool = get_pool().await?;
 
     let row = sqlx::query_as::<_, (i64, i64)>(
-        "SELECT COALESCE(SUM(word_count), 0), COUNT(*) FROM chapters WHERE book_id = ?1"
+        "SELECT COALESCE(SUM(word_count), 0), COUNT(*) FROM chapters WHERE book_id = ?1",
     )
     .bind(book_id)
     .fetch_optional(pool)
@@ -17,7 +113,7 @@ pub async fn check_should_detect(book_id: &str) -> anyhow::Result<bool> {
 
     let prev = sqlx::query_as::<_, (i64, i64)>(
         "SELECT COALESCE(last_checked_word_count, 0), COALESCE(last_checked_chapter_count, 0)
-         FROM conflict_check_progress WHERE book_id = ?1"
+         FROM conflict_check_progress WHERE book_id = ?1",
     )
     .bind(book_id)
     .fetch_optional(pool)
@@ -47,12 +143,32 @@ pub async fn ignore_conflict(conflict_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 取消忽略指定冲突
+pub async fn unignore_conflict(conflict_id: &str) -> anyhow::Result<()> {
+    let pool = get_pool().await?;
+    sqlx::query("UPDATE detected_conflicts SET is_ignored = 0, ignored_at = NULL WHERE id = ?1")
+        .bind(conflict_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 删除指定冲突
+pub async fn delete_conflict(conflict_id: &str) -> anyhow::Result<()> {
+    let pool = get_pool().await?;
+    sqlx::query("DELETE FROM detected_conflicts WHERE id = ?1")
+        .bind(conflict_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// 获取书籍的所有未忽略冲突
 pub async fn get_active_conflicts(book_id: &str) -> anyhow::Result<Vec<DetectedConflict>> {
     let pool = get_pool().await?;
     let rows = sqlx::query_as::<_, DetectedConflict>(
         "SELECT id, book_id, description, suggestion, detected_at, is_ignored, ignored_at
-         FROM detected_conflicts WHERE book_id = ?1 AND is_ignored = 0 ORDER BY detected_at DESC"
+         FROM detected_conflicts WHERE book_id = ?1 AND is_ignored = 0 ORDER BY detected_at DESC",
     )
     .bind(book_id)
     .fetch_all(pool)
@@ -60,62 +176,100 @@ pub async fn get_active_conflicts(book_id: &str) -> anyhow::Result<Vec<DetectedC
     Ok(rows)
 }
 
-/// 构建冲突检测专用工具（查询工具 + report_conflict）
+/// 获取书籍的所有冲突（包括已忽略的）
+pub async fn get_all_conflicts(book_id: &str) -> anyhow::Result<Vec<DetectedConflict>> {
+    let pool = get_pool().await?;
+    let rows = sqlx::query_as::<_, DetectedConflict>(
+        "SELECT id, book_id, description, suggestion, detected_at, is_ignored, ignored_at
+         FROM detected_conflicts WHERE book_id = ?1 ORDER BY detected_at DESC",
+    )
+    .bind(book_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// 构建冲突检测专用工具（精简版：只保留核心查询 + 报告工具）
 fn build_detection_tools() -> Vec<ToolDef> {
     vec![
+        // 核心：故事圣经（必读）
+        ToolDef {
+            def_type: "function".into(),
+            function: FunctionDef {
+                name: "get_story_memory".into(),
+                description: "获取小说的全局故事记忆（故事圣经），包括全书梗概、分卷梗概、事件时间线、主角状态、重要角色现状、未解决伏笔、世界观设定。第一轮必须调用！".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "bookId": {"type": "string", "description": "书籍ID"}
+                    },
+                    "required": ["bookId"]
+                }),
+            },
+        },
+        // 核心：章节摘要（第一轮必须读完所有章节）
         ToolDef {
             def_type: "function".into(),
             function: FunctionDef {
                 name: "query_chapter_summary".into(),
-                description: "获取章节摘要".into(),
-                parameters: serde_json::json!({"type":"object","properties":{"chapterId":{"type":"string"}},"required":["chapterId"]}),
+                description: "获取指定章节的摘要信息（短摘要+长摘要+标签+角色+事件+伏笔+未解决线索）。用于快速了解章节内容，第一轮必须读完所有章节摘要！".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "chapterId": {"type": "string", "description": "章节ID"}
+                    },
+                    "required": ["chapterId"]
+                }),
             },
         },
-        ToolDef {
-            def_type: "function".into(),
-            function: FunctionDef {
-                name: "list_character_cards".into(),
-                description: "获取所有角色卡".into(),
-                parameters: serde_json::json!({"type":"object","properties":{"bookId":{"type":"string"}},"required":["bookId"]}),
-            },
-        },
-        ToolDef {
-            def_type: "function".into(),
-            function: FunctionDef {
-                name: "get_character_card".into(),
-                description: "获取角色详情".into(),
-                parameters: serde_json::json!({"type":"object","properties":{"cardId":{"type":"string"}},"required":["cardId"]}),
-            },
-        },
+        // 验证：关键词搜索（用于验证疑点）
         ToolDef {
             def_type: "function".into(),
             function: FunctionDef {
                 name: "search_chapter_content".into(),
-                description: "全文搜索。默认普通匹配，regex=true启用正则。结果太多时换更精确的关键词".into(),
-                parameters: serde_json::json!({"type":"object","properties":{"chapterId":{"type":"string"},"keyword":{"type":"string"},"bookId":{"type":"string"},"regex":{"type":"boolean"}},"required":["keyword"]}),
+                description: "全文关键词搜索。用于验证摘要中的矛盾点，快速定位相关内容。优先使用此工具而非读取全文。".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "chapterId": {"type": "string", "description": "章节ID（可选，不指定则搜索全书）"},
+                        "keyword": {"type": "string", "description": "搜索关键字"},
+                        "bookId": {"type": "string", "description": "书籍ID（搜索全书时必填）"}
+                    },
+                    "required": ["keyword"]
+                }),
             },
         },
+        // 验证：读取正文（用于精确验证）
         ToolDef {
             def_type: "function".into(),
             function: FunctionDef {
                 name: "query_chapter_content".into(),
-                description: "获取章节内容（可指定行号）".into(),
-                parameters: serde_json::json!({"type":"object","properties":{"chapterId":{"type":"string"},"startLine":{"type":"integer"},"endLine":{"type":"integer"}},"required":["chapterId"]}),
+                description: "获取指定章节的正文内容。仅在搜索后需要精确验证特定段落时使用。可指定行号范围，不指定则返回全文。".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "chapterId": {"type": "string", "description": "章节ID"},
+                        "startLine": {"type": "integer", "description": "起始行号（1开始），负数表示从末尾倒数"},
+                        "endLine": {"type": "integer", "description": "结束行号（包含）"}
+                    },
+                    "required": ["chapterId"]
+                }),
             },
         },
+        // 报告：创建冲突记录
         ToolDef {
             def_type: "function".into(),
             function: FunctionDef {
                 name: "report_conflict".into(),
-                description: "报告一个设定冲突。每个冲突单独调用，细节差异和写作风格变化不算".into(),
+                description: "报告一个确认后的设定冲突。必须已查原文核实过再报告。每个确认的冲突单独调用一次。".into(),
                 parameters: serde_json::json!({
-                    "type":"object",
-                    "properties":{
-                        "description":{"type":"string","description":"冲突描述"},
-                        "suggestion":{"type":"string","description":"修改建议"},
-                        "severity":{"type":"string","description":"high/medium/low"}
+                    "type": "object",
+                    "properties": {
+                        "description": {"type": "string", "description": "冲突描述，如'第1章叶铃音是黑发，第5章变成了银发'"},
+                        "suggestion": {"type": "string", "description": "修改建议"},
+                        "severity": {"type": "string", "description": "严重程度：high/medium/low"}
                     },
-                    "required":["description","suggestion","severity"]
+                    "required": ["description", "suggestion", "severity"]
                 }),
             },
         },
@@ -138,23 +292,51 @@ pub async fn run_detection(book_id: &str, config: &AIConfig) -> anyhow::Result<V
         })
         .unwrap_or_default();
 
+    // 获取已有冲突（包括已忽略的），防止重复检测
+    let existing_conflicts = get_all_conflicts(book_id).await.unwrap_or_default();
+    let existing_conflicts_text = if existing_conflicts.is_empty() {
+        "暂无已记录的冲突。".to_string()
+    } else {
+        let mut s = String::from("**已有冲突记录（请勿重复报告）：**\n\n");
+        for (i, c) in existing_conflicts.iter().enumerate() {
+            let status = if c.is_ignored == 1 { "【已忽略】" } else { "" };
+            s.push_str(&format!(
+                "{}. {} {}\n   建议：{}\n\n",
+                i + 1,
+                status,
+                c.description,
+                c.suggestion
+            ));
+        }
+        s
+    };
+
     let prompt_manager = crate::services::prompt_service::get_prompt_manager();
+    let max_rounds = config.max_rounds.clamp(20, 50) as usize;
     let system_prompt = prompt_manager
         .conflict_detection
-        .replace("{{CHAPTER_LIST}}", &chapter_list);
+        .replace("{{CHAPTER_LIST}}", &chapter_list)
+        .replace("{{MAX_ROUNDS}}", &max_rounds.to_string())
+        .replace("{{EXISTING_CONFLICTS}}", &existing_conflicts_text);
 
     let messages = vec![
         ChatMessage::new("system", &system_prompt),
-        ChatMessage::new("user", "请逐项检查这本书的设定冲突。必须用工具查询实际数据来比对，不要凭感觉。\n\n检查步骤：\n1. 先查所有角色卡\n2. 逐章查询章节内容（每章至少查首尾部分）\n3. 逐项比对：角色外貌是否一致？性格是否突变？时间是否线性？地点是否一致？\n4. 发现矛盾后必须再次查原文确认\n\n注意：如果没有调用任何查询工具就直接回答\"未检测到冲突\"，说明你没有真正检查。必须先查数据再下结论。"),
+        ChatMessage::new("user", "开始冲突检测。\n\n**已有冲突记录已加载，请勿重复报告相同的冲突。**\n\n**第1轮必须完成**：\n1. 调用 get_story_memory 获取故事圣经\n2. 调用 query_chapter_summary 读完所有章节摘要\n\n**后续轮次**：\n- 分析摘要中的矛盾信号\n- 用 search_chapter_content 关键词搜索验证\n- 必要时用 query_chapter_content 读取具体段落\n- 确认冲突后用 report_conflict 报告\n\n**禁止**：\n- 不要没查数据就下结论\n- 不要把轮次浪费在无关章节上\n- 不要机械遍历所有章节\n- 不要重复报告已有冲突"),
     ];
 
     let tools = build_detection_tools();
     let mut messages = messages;
-    let max_rounds = 10;
     let mut total_conflicts = 0;
 
     for round in 0..max_rounds {
         log::info!("[Conflict] 检测轮次 {}/{}", round + 1, max_rounds);
+
+        let round_prompt = format!(
+            "当前是第 {}/{} 轮工具调用。请根据剩余轮次规划查询策略，优先查询信息密度高、覆盖范围广的工具；如果剩余轮次不多，请收缩范围，只继续验证高概率冲突。",
+            round + 1,
+            max_rounds
+        );
+        messages.push(ChatMessage::new("system", &round_prompt));
 
         let decision = crate::services::ai_service::send_ai_message(
             messages.clone(), config.clone(), Some(&tools),
@@ -190,43 +372,37 @@ pub async fn run_detection(book_id: &str, config: &AIConfig) -> anyhow::Result<V
                     let desc = args.get("description").and_then(|v| v.as_str()).unwrap_or("");
                     let sug = args.get("suggestion").and_then(|v| v.as_str()).unwrap_or("");
                     let sev = args.get("severity").and_then(|v| v.as_str()).unwrap_or("?");
-                    // 过滤"没问题"类的伪冲突
-                    let lower = desc.to_lowercase();
-                    let is_no_problem = desc.is_empty()
-                        || lower.contains("未检测到")
-                        || lower.contains("未发现")
-                        || lower.contains("没有冲突")
-                        || lower.contains("没有问题")
-                        || lower.contains("无需修改")
-                        || lower.contains("设定一致");
-                    if is_no_problem {
+                    if is_invalid_conflict_report(desc) {
                         log::info!("[Conflict] ⚠ 跳过无效报告: {}", desc);
                     } else {
                         log::info!("[Conflict] ⚠ 报告冲突 ({}): {} | 建议: {}", sev, desc, sug);
-                        if !desc.is_empty() {
-                            let pool = get_pool().await?;
-                            let id = format!("conflict_{}", Uuid::new_v4().to_string().replace('-', "_"));
-                            let now = chrono::Utc::now().timestamp();
-                            let _ = sqlx::query(
-                                "INSERT INTO detected_conflicts (id, book_id, description, suggestion, detected_at, is_ignored)
-                                 VALUES (?1, ?2, ?3, ?4, ?5, 0)"
-                            ).bind(&id).bind(book_id).bind(desc).bind(sug).bind(now).execute(pool).await;
-                            total_conflicts += 1;
-                        }
-                        messages.push(ChatMessage {
-                            role: "tool".into(),
-                            content: Some("冲突已记录".into()),
-                            tool_calls: None,
-                            tool_call_id: Some(tc.id.clone()),
-                            name: Some("report_conflict".into()),
-                        });
+                        save_detected_conflict(book_id, desc, sug).await?;
+                        total_conflicts += 1;
                     }
+                    messages.push(ChatMessage {
+                        role: "tool".into(),
+                        content: Some(if is_invalid_conflict_report(desc) {
+                            format!("跳过无效报告: {}", desc)
+                        } else {
+                            "冲突已记录".into()
+                        }),
+                        tool_calls: None,
+                        tool_call_id: Some(tc.id.clone()),
+                        name: Some("report_conflict".into()),
+                    });
                 } else {
                     // 查询工具：实际执行
                     log::info!("[Conflict] 执行查询工具: {} args={}", tc.function.name, args);
-                    let result = crate::services::tool_call_service::execute_tool_call(
-                        &crate::models::ToolCall { name: tc.function.name.clone(), arguments: args }
-                    ).await?;
+                    let result = match crate::services::tool_call_service::execute_tool_call(
+                        &crate::models::ToolCall { name: tc.function.name.clone(), arguments: args },
+                    ).await {
+                        Ok(result) => result,
+                        Err(e) => {
+                            let error_text = format!("工具 {} 执行失败：{}", tc.function.name, e);
+                            log::error!("[Conflict] {}", error_text);
+                            error_text
+                        }
+                    };
                     log::info!("[Conflict] 查询结果长度: {} 字", result.len());
                     messages.push(ChatMessage {
                         role: "tool".into(),
@@ -256,10 +432,27 @@ log::info!("[Conflict] AI最终回答: {}", preview);
     ).bind(book_id).fetch_optional(pool).await?.unwrap_or((0, 0));
     let now = chrono::Utc::now().timestamp();
     let _ = sqlx::query(
-        "INSERT INTO conflict_check_progress (book_id, last_checked_word_count, last_checked_chapter_count, last_checked_at)
-         VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO conflict_check_progress (
+            book_id,
+            last_checked_word_count,
+            last_checked_chapter_count,
+            last_checked_at,
+            last_status,
+            last_error_kind,
+            last_error_message,
+            last_error_at,
+            last_auto_checked_at
+         )
+         VALUES (?1, ?2, ?3, ?4, 'success', NULL, NULL, 0, ?4)
          ON CONFLICT(book_id) DO UPDATE SET
-         last_checked_word_count = ?2, last_checked_chapter_count = ?3, last_checked_at = ?4"
+         last_checked_word_count = ?2,
+         last_checked_chapter_count = ?3,
+         last_checked_at = ?4,
+         last_status = 'success',
+         last_error_kind = NULL,
+         last_error_message = NULL,
+         last_error_at = 0,
+         last_auto_checked_at = ?4"
     ).bind(book_id).bind(row.0).bind(row.1).bind(now).execute(pool).await;
 
     get_active_conflicts(book_id).await

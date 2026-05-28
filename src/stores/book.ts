@@ -994,6 +994,7 @@ export const useBookStore = defineStore('book', () => {
     currentContent,
     wordCount,
     totalWordCount,
+    chapterContents,
     // Actions
     createBook,
     loadBook,

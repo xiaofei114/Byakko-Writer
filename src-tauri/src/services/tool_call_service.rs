@@ -19,14 +19,18 @@ pub async fn execute_tool_call(tool_call: &ToolCall) -> anyhow::Result<String> {
             let chapter_id = tool_call.arguments.get("chapterId")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("缺少 chapterId 参数"))?;
-            let summary = crate::services::summary_service::query_chapter_summary(chapter_id).await?;
+            let summary = crate::services::summary_service::query_chapter_summary(chapter_id)
+                .await
+                .unwrap_or_else(|e| format!("查询章节摘要失败：{}", e));
             Ok(summary)
         }
         "query_chapter_content" => {
             let chapter_id = tool_call.arguments.get("chapterId")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("缺少 chapterId 参数"))?;
-            let content = crate::services::summary_service::query_chapter_content(chapter_id).await?;
+            let content = crate::services::summary_service::query_chapter_content(chapter_id)
+                .await
+                .unwrap_or_else(|e| format!("查询章节内容失败：{}", e));
             let lines: Vec<&str> = content.lines().collect();
             let total = lines.len() as i64;
 
@@ -242,7 +246,9 @@ pub async fn execute_tool_call(tool_call: &ToolCall) -> anyhow::Result<String> {
             };
 
             if let Some(chapter_id) = tool_call.arguments.get("chapterId").and_then(|v| v.as_str()) {
-                let content = crate::services::summary_service::query_chapter_content(chapter_id).await?;
+                let content = crate::services::summary_service::query_chapter_content(chapter_id)
+                    .await
+                    .unwrap_or_else(|e| format!("查询章节内容失败：{}", e));
                 let matches: Vec<String> = content.lines()
                     .enumerate()
                     .filter(|(_, line)| is_match(line))
@@ -306,6 +312,144 @@ pub async fn execute_tool_call(tool_call: &ToolCall) -> anyhow::Result<String> {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("缺少 volumeId 参数"))?;
             crate::services::story_memory_service::get_chapters_in_volume(book_id, volume_id).await
+        }
+
+        // ===== 新增工具 =====
+        "propose_line_edit" => {
+            // 此工具需要前端交互，后端只返回需要确认的信息
+            let chapter_id = tool_call.arguments.get("chapterId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 chapterId 参数"))?;
+            let line_number = tool_call.arguments.get("lineNumber")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| anyhow::anyhow!("缺少 lineNumber 参数"))?;
+            let original_text = tool_call.arguments.get("originalText")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 originalText 参数"))?;
+            let new_text = tool_call.arguments.get("newText")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 newText 参数"))?;
+            let reason = tool_call.arguments.get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            // 返回给前端处理的格式
+            let result = serde_json::json!({
+                "tool": "propose_line_edit",
+                "chapterId": chapter_id,
+                "lineNumber": line_number,
+                "originalText": original_text,
+                "newText": new_text,
+                "reason": reason,
+                "requiresUserConfirmation": true
+            });
+            Ok(result.to_string())
+        }
+
+        "get_volume_outline" => {
+            let book_id = tool_call.arguments.get("bookId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 bookId 参数"))?;
+            let volume_id = tool_call.arguments.get("volumeId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 volumeId 参数"))?;
+            let outline_type = tool_call.arguments.get("outlineType")
+                .and_then(|v| v.as_str())
+                .unwrap_or("coarse");
+
+            let outline = crate::services::outline_service::get_outline_by_level(
+                book_id.to_string(),
+                Some(volume_id.to_string()),
+                None,
+                outline_type.to_string()
+            ).await.ok();
+
+            match outline {
+                Some(o) => Ok(serde_json::to_string(&o)?),
+                None => Ok(format!("未找到该卷的{}大纲", if outline_type == "coarse" { "粗" } else { "细" }))
+            }
+        }
+
+        "ask_user" => {
+            // 此工具需要前端交互，返回问题信息给前端展示
+            let question = tool_call.arguments.get("question")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 question 参数"))?;
+            let context = tool_call.arguments.get("context")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let options = tool_call.arguments.get("options")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect::<Vec<_>>())
+                .unwrap_or_default();
+
+            let result = serde_json::json!({
+                "tool": "ask_user",
+                "question": question,
+                "context": context,
+                "options": options,
+                "requiresUserResponse": true
+            });
+            Ok(result.to_string())
+        }
+
+        "create_chapter" => {
+            let book_id = tool_call.arguments.get("bookId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("缺少 bookId 参数"))?;
+
+            // 获取volume_id：如果指定了就用指定的，否则用最后一卷
+            let volume_id = if let Some(vid) = tool_call.arguments.get("volumeId").and_then(|v| v.as_str()) {
+                vid.to_string()
+            } else {
+                // 查询最后一卷
+                let pool = crate::db::get_pool().await?;
+                let row = sqlx::query("SELECT id FROM volumes WHERE book_id = ? ORDER BY created_at DESC LIMIT 1")
+                    .bind(book_id)
+                    .fetch_optional(pool)
+                    .await?;
+                match row {
+                    Some(r) => r.try_get::<String, _>("id")?,
+                    None => return Err(anyhow::anyhow!("书籍 {} 没有卷，请先创建卷", book_id)),
+                }
+            };
+
+            // 获取order：如果指定了就用指定的，否则自动计算
+            let order = if let Some(ord) = tool_call.arguments.get("order").and_then(|v| v.as_i64()) {
+                ord as i32
+            } else {
+                // 查询当前最大order
+                let pool = crate::db::get_pool().await?;
+                let row = sqlx::query("SELECT MAX(order_num) as max_order FROM chapters WHERE book_id = ?")
+                    .bind(book_id)
+                    .fetch_one(pool)
+                    .await?;
+                let max_order: Option<i32> = row.try_get("max_order")?;
+                max_order.unwrap_or(0) + 1
+            };
+
+            // 获取或生成标题
+            let title = if let Some(t) = tool_call.arguments.get("title").and_then(|v| v.as_str()) {
+                t.to_string()
+            } else {
+                // 自动生成标题：第X章
+                format!("第{}章", order)
+            };
+
+            // 创建章节
+            let chapter = crate::services::book_service::create_chapter_with_order(
+                book_id.to_string(),
+                title.to_string(),
+                volume_id,
+                order,
+            ).await?;
+
+            Ok(serde_json::json!({
+                "chapterId": chapter.id,
+                "title": chapter.title,
+                "order": chapter.order,
+                "message": format!("成功创建章节：{}", chapter.title)
+            }).to_string())
         }
 
         _ => Err(anyhow::anyhow!("未知工具: {}", tool_call.name)),

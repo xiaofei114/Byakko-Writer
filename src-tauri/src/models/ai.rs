@@ -3,20 +3,42 @@ use serde::{Deserialize, Serialize};
 /// AI 配置
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AIConfig {
+    #[serde(default = "default_provider")]
     pub provider: String,
-    #[serde(alias = "apiKey")]
+    #[serde(alias = "apiKey", default)]
     pub api_key: String,
-    #[serde(alias = "apiUrl")]
+    #[serde(alias = "apiUrl", default = "default_api_url")]
     pub api_url: String,
+    #[serde(default = "default_model")]
     pub model: String,
+    #[serde(default = "default_temperature")]
     pub temperature: f32,
-    #[serde(alias = "maxTokens")]
+    #[serde(alias = "maxTokens", default = "default_max_tokens")]
     pub max_tokens: i32,
     #[serde(alias = "maxRounds", default = "default_max_rounds")]
     pub max_rounds: i32,
 }
 
-fn default_max_rounds() -> i32 { 10 }
+impl Default for AIConfig {
+    fn default() -> Self {
+        Self {
+            provider: default_provider(),
+            api_key: String::default(),
+            api_url: default_api_url(),
+            model: default_model(),
+            temperature: default_temperature(),
+            max_tokens: default_max_tokens(),
+            max_rounds: default_max_rounds(),
+        }
+    }
+}
+
+fn default_provider() -> String { "deepseek".to_string() }
+fn default_api_url() -> String { "https://api.deepseek.com/v1".to_string() }
+fn default_model() -> String { "deepseek-chat".to_string() }
+fn default_temperature() -> f32 { 0.7 }
+fn default_max_tokens() -> i32 { 10000 }
+fn default_max_rounds() -> i32 { 30 }
 
 /// 工具调用定义
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,6 +144,14 @@ pub struct ChapterSummary {
     pub characters: Vec<String>,
     pub locations: Vec<String>,
     pub events: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plot_progression: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub emotional_beats: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub foreshadowing: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub unresolved_threads: Vec<String>,
     pub generated_at: i64,
     pub is_confirmed: bool,
 }
@@ -135,6 +165,14 @@ pub struct SummaryResponse {
     pub characters: Vec<String>,
     pub locations: Vec<String>,
     pub events: Vec<String>,
+    #[serde(default)]
+    pub plot_progression: Option<String>,
+    #[serde(default)]
+    pub emotional_beats: Vec<String>,
+    #[serde(default)]
+    pub foreshadowing: Vec<String>,
+    #[serde(default)]
+    pub unresolved_threads: Vec<String>,
 }
 
 /// 工具调用
