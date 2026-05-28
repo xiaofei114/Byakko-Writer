@@ -247,51 +247,6 @@ fn build_tools() -> Vec<ToolDef> {
                 }),
             },
         },
-        // ===== 故事记忆类 =====
-        ToolDef {
-            def_type: "function".into(),
-            function: FunctionDef {
-                name: "get_story_memory".into(),
-                description: "获取小说的全局故事记忆（故事圣经），包括全书梗概、分卷梗概、事件时间线、主角状态、重要角色现状、未解决伏笔、世界观设定。这是AI理解全书剧情的首要入口，在回答剧情、角色、设定相关问题前应优先使用。".into(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "bookId": {"type": "string", "description": "书籍ID"}
-                    },
-                    "required": ["bookId"]
-                }),
-            },
-        },
-        ToolDef {
-            def_type: "function".into(),
-            function: FunctionDef {
-                name: "get_character_timeline".into(),
-                description: "获取特定角色在全书中的关键事件时间线和当前状态。用于回答'XX角色做了什么'之类需要了解角色故事弧线的问题。".into(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "bookId": {"type": "string", "description": "书籍ID"},
-                        "characterName": {"type": "string", "description": "角色名"}
-                    },
-                    "required": ["bookId", "characterName"]
-                }),
-            },
-        },
-        ToolDef {
-            def_type: "function".into(),
-            function: FunctionDef {
-                name: "list_chapters_in_volume".into(),
-                description: "获取指定卷下的所有章节列表（含ID和标题）。浏览具体章节时使用，避免一次性加载全书所有章节。".into(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "bookId": {"type": "string", "description": "书籍ID"},
-                        "volumeId": {"type": "string", "description": "卷ID"}
-                    },
-                    "required": ["bookId", "volumeId"]
-                }),
-            },
-        },
     ]
 }
 
@@ -353,12 +308,12 @@ impl AgentOrchestrator {
             compressed_context: String::new(),
         });
 
-        // 构建 system prompt（每次都刷新，确保 Story Bible 最新）
-        let story_bible_text = crate::services::story_memory_service::get_story_bible_for_prompt(book_id).await;
+        // 构建 system prompt（每次都刷新，确保 CHAPTER_LIST 最新）
+        let chapter_list = Self::get_chapter_list(book_id).await.unwrap_or_default();
         let system_prompt = prompt_manager
             .decision_agent
             .replace("{{BOOK_ID}}", book_id)
-            .replace("{{STORY_BIBLE}}", &story_bible_text)
+            .replace("{{CHAPTER_LIST}}", &chapter_list)
             .replace("{{COMPRESSED_CONTEXT}}", &state.compressed_context);
 
         // 应用后台压缩好的上下文（如果有）
@@ -796,6 +751,27 @@ impl AgentOrchestrator {
         Ok(())
     }
 
+    /// 获取章节列表字符串
+    async fn get_chapter_list(book_id: &str) -> anyhow::Result<String> {
+        let book = crate::services::book_service::load_book(book_id.to_string()).await?;
+
+        if book.chapters.is_empty() {
+            return Ok("当前书籍没有章节".to_string());
+        }
+
+        let mut result = String::from("当前书籍的章节列表（按顺序）：\n");
+        for (i, chapter) in book.chapters.iter().enumerate() {
+            result.push_str(&format!(
+                "{}. {} (ID: {})\n",
+                i + 1,
+                chapter.title,
+                chapter.id
+            ));
+        }
+
+        Ok(result)
+    }
+
     /// 从消息历史中提取写作上下文
     fn extract_writer_context(messages: &[ChatMessage]) -> String {
         let mut ctx = String::new();
@@ -910,9 +886,6 @@ impl AgentOrchestrator {
             "report_conflict" => "报告设定冲突",
             "write_chapter" => "创作正文",
             "learn_writing_style" => "学习写作风格",
-            "get_story_memory" => "获取故事记忆",
-            "get_character_timeline" => "查询角色时间线",
-            "list_chapters_in_volume" => "列出卷内章节",
             _ => tool_name,
         };
 
