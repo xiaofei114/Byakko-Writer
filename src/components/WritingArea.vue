@@ -237,6 +237,19 @@ const handleInput = () => {
   }, 100);
 };
 
+// 处理粘贴事件：只保留纯文本
+const handlePaste = (e: ClipboardEvent) => {
+  e.preventDefault();
+  
+  const text = e.clipboardData?.getData('text/plain') || '';
+  if (!text || !editorRef.value) return;
+  
+  // 使用 execCommand 插入文本，自动推入浏览器撤销栈
+  document.execCommand('insertText', false, text);
+  
+  handleInput();
+};
+
 // 处理键盘事件
 const handleKeyDown = (e: KeyboardEvent) => {
   if ((e.ctrlKey || e.metaKey) && e.key === 's') {
@@ -487,6 +500,11 @@ onMounted(() => {
 
   // 监听章节内容变化事件（来自AI单行修改）
   window.addEventListener('chapter-content-changed', handleChapterContentChanged as EventListener);
+
+  // 监听粘贴事件
+  if (editorRef.value) {
+    editorRef.value.addEventListener('paste', handlePaste);
+  }
 });
 
 onUnmounted(() => {
@@ -501,6 +519,10 @@ onUnmounted(() => {
   window.removeEventListener('apply-polish', handleApplyPolish as EventListener);
   window.removeEventListener('apply-line-edit', handleApplyLineEdit as EventListener);
   window.removeEventListener('chapter-content-changed', handleChapterContentChanged as EventListener);
+
+  if (editorRef.value) {
+    editorRef.value.removeEventListener('paste', handlePaste);
+  }
 });
 </script>
 

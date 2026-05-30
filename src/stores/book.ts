@@ -44,7 +44,7 @@ export const useBookStore = defineStore('book', () => {
   const chatMessages = ref<ChatMessage[]>([]);
   const isSaving = ref(false);
   const lastSavedAt = ref<number>(0);
-  const booksList = ref<{ id: string; title: string; updatedAt: number }[]>([]);
+  const booksList = ref<{ id: string; title: string; author: string; description: string; updatedAt: number }[]>([]);
   // 缓存章节内容（避免频繁读写文件）
   const chapterContents = ref<Map<string, string>>(new Map());
   
@@ -477,11 +477,17 @@ export const useBookStore = defineStore('book', () => {
   const updateVolumeTitle = async (volumeId: string, title: string) => {
     if (!currentBook.value) return;
     
-    const volume = currentBook.value.volumes.find(v => v.id === volumeId);
-    if (volume) {
-      volume.title = title;
-      volume.updatedAt = Date.now();
-      await saveBook();
+    try {
+      await invoke('update_volume_title', { volumeId, title });
+      
+      const volume = currentBook.value.volumes.find(v => v.id === volumeId);
+      if (volume) {
+        volume.title = title;
+        volume.updatedAt = Date.now();
+      }
+    } catch (error) {
+      console.error('更新卷标题失败:', error);
+      throw error;
     }
   };
 
@@ -496,10 +502,12 @@ export const useBookStore = defineStore('book', () => {
 
   const updateBooksList = async () => {
     try {
-      const list = await invoke<{ id: string; title: string; updated_at: number }[]>('get_books_list');
+      const list = await invoke<{ id: string; title: string; author: string; description: string; updated_at: number }[]>('get_books_list');
       booksList.value = list.map(b => ({
         id: b.id,
         title: b.title,
+        author: b.author,
+        description: b.description,
         updatedAt: b.updated_at
       }));
     } catch (error) {

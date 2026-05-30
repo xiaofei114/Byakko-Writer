@@ -36,17 +36,19 @@ pub async fn create_book(title: String) -> anyhow::Result<Book> {
 pub async fn get_books_list() -> anyhow::Result<Vec<BookListItem>> {
     let pool = get_pool().await?;
     
-    let books = sqlx::query_as::<_, (String, String, i64)>(
-        "SELECT id, title, updated_at FROM books ORDER BY updated_at DESC"
+    let books = sqlx::query_as::<_, (String, String, String, String, i64)>(
+        "SELECT id, title, author, description, updated_at FROM books ORDER BY updated_at DESC"
     )
     .fetch_all(pool)
     .await?;
     
     Ok(books
         .into_iter()
-        .map(|(id, title, updated_at)| BookListItem {
+        .map(|(id, title, author, description, updated_at)| BookListItem {
             id,
             title,
+            author,
+            description,
             updated_at,
         })
         .collect())
@@ -131,6 +133,27 @@ pub async fn save_book(book: Book) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 更新书籍信息
+pub async fn update_book(book_id: String, title: String, author: String, description: String) -> anyhow::Result<()> {
+    let pool = get_pool().await?;
+    let now = chrono::Local::now().timestamp_millis();
+    
+    sqlx::query(
+        r#"
+        UPDATE books SET title = ?1, author = ?2, description = ?3, updated_at = ?4 WHERE id = ?5
+        "#
+    )
+    .bind(&title)
+    .bind(&author)
+    .bind(&description)
+    .bind(now)
+    .bind(&book_id)
+    .execute(pool)
+    .await?;
+    
+    Ok(())
+}
+
 /// 删除书籍
 pub async fn delete_book(book_id: String) -> anyhow::Result<()> {
     let pool = get_pool().await?;
@@ -191,6 +214,25 @@ pub async fn delete_volume(volume_id: String) -> anyhow::Result<()> {
         .bind(&volume_id)
         .execute(pool)
         .await?;
+    
+    Ok(())
+}
+
+/// 更新卷标题
+pub async fn update_volume_title(volume_id: String, title: String) -> anyhow::Result<()> {
+    let pool = get_pool().await?;
+    let now = chrono::Local::now().timestamp_millis();
+    
+    sqlx::query(
+        r#"
+        UPDATE volumes SET title = ?1, updated_at = ?2 WHERE id = ?3
+        "#
+    )
+    .bind(&title)
+    .bind(now)
+    .bind(&volume_id)
+    .execute(pool)
+    .await?;
     
     Ok(())
 }

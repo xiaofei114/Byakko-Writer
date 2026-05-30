@@ -42,14 +42,24 @@ fn build_tools() -> Vec<ToolDef> {
         ToolDef {
             def_type: "function".into(),
             function: FunctionDef {
+                name: "get_book_info".into(),
+                description: "获取当前书籍的基本信息（书名、作者、简介）".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }),
+            },
+        },
+        ToolDef {
+            def_type: "function".into(),
+            function: FunctionDef {
                 name: "list_all_chapters".into(),
                 description: "获取当前书籍的所有章节列表（含章节ID和标题）".into(),
                 parameters: serde_json::json!({
                     "type": "object",
-                    "properties": {
-                        "bookId": {"type": "string", "description": "书籍ID"}
-                    },
-                    "required": ["bookId"]
+                    "properties": {},
+                    "required": []
                 }),
             },
         },
@@ -77,7 +87,6 @@ fn build_tools() -> Vec<ToolDef> {
                     "properties": {
                         "chapterId": {"type": "string", "description": "章节ID（可选，不指定则搜索全书）"},
                         "keyword": {"type": "string", "description": "搜索关键字或正则表达式"},
-                        "bookId": {"type": "string", "description": "书籍ID（搜索全书时必填）"},
                         "regex": {"type": "boolean", "description": "是否使用正则表达式（默认false=普通模糊匹配）"}
                     },
                     "required": ["keyword"]
@@ -107,10 +116,8 @@ fn build_tools() -> Vec<ToolDef> {
                 description: "获取当前书籍的所有角色卡列表".into(),
                 parameters: serde_json::json!({
                     "type": "object",
-                    "properties": {
-                        "bookId": {"type": "string", "description": "书籍ID"}
-                    },
-                    "required": ["bookId"]
+                    "properties": {},
+                    "required": []
                 }),
             },
         },
@@ -137,10 +144,9 @@ fn build_tools() -> Vec<ToolDef> {
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "chapterId": {"type": "string", "description": "章节ID"},
-                        "bookId": {"type": "string", "description": "书籍ID"}
+                        "chapterId": {"type": "string", "description": "章节ID"}
                     },
-                    "required": ["chapterId", "bookId"]
+                    "required": ["chapterId"]
                 }),
             },
         },
@@ -153,7 +159,6 @@ fn build_tools() -> Vec<ToolDef> {
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "bookId": {"type": "string", "description": "书籍ID"},
                         "name": {"type": "string", "description": "角色名"},
                         "gender": {"type": "string", "description": "性别"},
                         "age": {"type": "string", "description": "年龄"},
@@ -163,7 +168,7 @@ fn build_tools() -> Vec<ToolDef> {
                         "goals": {"type": "string", "description": "目标"},
                         "notes": {"type": "string", "description": "备注"}
                     },
-                    "required": ["bookId", "name"]
+                    "required": ["name"]
                 }),
             },
         },
@@ -193,12 +198,11 @@ fn build_tools() -> Vec<ToolDef> {
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "bookId": {"type": "string", "description": "书籍ID"},
                         "chapterId": {"type": "string", "description": "章节ID"},
                         "outlineType": {"type": "string", "description": "coarse(粗纲) 或 fine(细纲)"},
                         "content": {"type": "string", "description": "大纲内容"}
                     },
-                    "required": ["bookId", "chapterId", "outlineType", "content"]
+                    "required": ["chapterId", "outlineType", "content"]
                 }),
             },
         },
@@ -240,15 +244,14 @@ fn build_tools() -> Vec<ToolDef> {
             def_type: "function".into(),
             function: FunctionDef {
                 name: "get_volume_outline".into(),
-                description: "获取指定卷的粗纲或细纲".into(),
+                description: "获取指定卷的粗纲或细纲。volumeName参数传卷名（如'第一卷'），从get_book_info结果中获取卷名列表".into(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "bookId": {"type": "string", "description": "书籍ID"},
-                        "volumeId": {"type": "string", "description": "卷ID"},
+                        "volumeName": {"type": "string", "description": "卷名，如'第一卷'、'觉醒篇'等"},
                         "outlineType": {"type": "string", "description": "coarse(粗纲) 或 fine(细纲)，默认coarse"}
                     },
-                    "required": ["bookId", "volumeId"]
+                    "required": ["volumeName"]
                 }),
             },
         },
@@ -260,12 +263,11 @@ fn build_tools() -> Vec<ToolDef> {
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "bookId": {"type": "string", "description": "书籍ID"},
                         "volumeId": {"type": "string", "description": "卷ID（可选）"},
                         "title": {"type": "string", "description": "章节标题（可选）"},
                         "order": {"type": "integer", "description": "排序号（可选）"}
                     },
-                    "required": ["bookId"]
+                    "required": []
                 }),
             },
         },
@@ -276,10 +278,8 @@ fn build_tools() -> Vec<ToolDef> {
                 description: "分析并学习当前书籍的写作风格".into(),
                 parameters: serde_json::json!({
                     "type": "object",
-                    "properties": {
-                        "bookId": {"type": "string", "description": "书籍ID"}
-                    },
-                    "required": ["bookId"]
+                    "properties": {},
+                    "required": []
                 }),
             },
         },
@@ -389,12 +389,14 @@ impl AgentOrchestrator {
             state.messages.push(ChatMessage::new("user", user_message));
         }
 
-        // 构建 system prompt（每次都刷新，确保 CHAPTER_LIST 最新）
+        // 构建 system prompt（每次都刷新，确保 CHAPTER_LIST 和 STORY_BIBLE 最新）
         let chapter_list = Self::get_chapter_list(book_id).await.unwrap_or_default();
+        let story_bible = crate::services::story_memory_service::build_story_memory_text(book_id).await.unwrap_or_default();
         let system_prompt = prompt_manager
             .decision_agent
             .replace("{{BOOK_ID}}", book_id)
             .replace("{{CHAPTER_LIST}}", &chapter_list)
+            .replace("{{STORY_BIBLE}}", &story_bible)
             .replace("{{COMPRESSED_CONTEXT}}", &state.compressed_context);
 
         // 应用后台压缩好的上下文（如果有）
@@ -669,22 +671,10 @@ impl AgentOrchestrator {
                         }));
                         format!("询问用户：{}", question)
                     } else {
-                        // 自动注入 bookId：当工具需要 bookId 且 AI 未传入时，使用当前 bookId
-                        let mut args = args.clone();
-                        let has_book_id = args.get("bookId").and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false);
-                        if !has_book_id {
-                            let needs_book_id = matches!(tool_name.as_str(),
-                                "search_chapter_content" | "list_all_chapters" | "list_character_cards"
-                                | "create_chapter" | "learn_writing_style"
-                            );
-                            if needs_book_id {
-                                args["bookId"] = serde_json::json!(book_id);
-                            }
-                        }
                         execute_tool_call(&ToolCall {
                             name: tool_name.clone(),
-                            arguments: args,
-                        }).await?
+                            arguments: args.clone(),
+                        }, book_id).await?
                     };
 
                     tool_results.push(format!("工具 {} 返回: {}", tool_name, result));
@@ -1091,6 +1081,7 @@ impl AgentOrchestrator {
     /// 发送工具调用事件
     async fn emit_tool_event(app: &AppHandle, session_id: &str, tool_name: &str, tool_params: Option<serde_json::Value>) {
         let display_name = match tool_name {
+            "get_book_info" => "获取书籍信息",
             "list_all_chapters" => "获取章节列表",
             "query_chapter_summary" => "查询章节摘要",
             "search_chapter_content" => "搜索章节内容",
@@ -1108,6 +1099,9 @@ impl AgentOrchestrator {
             "get_volume_outline" => "获取卷大纲",
             "create_chapter" => "创建章节",
             "ask_user" => "询问用户",
+            "get_story_memory" => "获取故事记忆",
+            "get_character_timeline" => "获取角色时间线",
+            "list_chapters_in_volume" => "获取卷内章节",
             _ => tool_name,
         };
 

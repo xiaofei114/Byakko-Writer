@@ -812,6 +812,25 @@ const buildToolDisplayText = (toolName: string, displayName: string, params?: Re
       return params?.question ? `询问：${params.question}` : '询问用户';
     case 'list_all_chapters':
       return '获取书籍章节列表';
+    case 'list_character_cards':
+      return '获取角色列表';
+    case 'get_book_info':
+      return '获取书籍信息';
+    case 'get_volume_outline': {
+      const volTitle = params?.volumeName || '未知卷';
+      const typeLabel = params?.outlineType === 'fine' ? '细纲' : '粗纲';
+      return `获取${volTitle}${typeLabel}`;
+    }
+    case 'get_story_memory':
+      return '获取故事记忆';
+    case 'get_character_timeline':
+      return params?.characterName ? `获取角色「${params.characterName}」时间线` : '获取角色时间线';
+    case 'list_chapters_in_volume':
+      return '获取卷内章节';
+    case 'learn_writing_style':
+      return '学习写作风格';
+    case 'report_conflict':
+      return '报告设定冲突';
     default:
       return displayName;
   }

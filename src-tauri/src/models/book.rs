@@ -45,5 +45,7 @@ pub struct Book {
 pub struct BookListItem {
     pub id: String,
     pub title: String,
+    pub author: String,
+    pub description: String,
     pub updated_at: i64,
 }

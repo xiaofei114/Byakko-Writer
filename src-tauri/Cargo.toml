@@ -1,6 +1,6 @@
 [package]
 name = "byakko-writer"
-version = "0.1.0"
+version = "0.0.5-beta"
 description = "白喵写作 - Byakko Writer"
 edition = "2021"
 

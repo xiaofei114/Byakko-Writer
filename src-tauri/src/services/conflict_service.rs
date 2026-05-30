@@ -395,6 +395,7 @@ pub async fn run_detection(book_id: &str, config: &AIConfig) -> anyhow::Result<V
                     log::info!("[Conflict] 执行查询工具: {} args={}", tc.function.name, args);
                     let result = match crate::services::tool_call_service::execute_tool_call(
                         &crate::models::ToolCall { name: tc.function.name.clone(), arguments: args },
+                        book_id,
                     ).await {
                         Ok(result) => result,
                         Err(e) => {

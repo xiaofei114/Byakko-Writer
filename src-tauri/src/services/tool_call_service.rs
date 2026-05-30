@@ -1,17 +1,36 @@
 use crate::models::ToolCall;
 use sqlx::Row;
 
-/// 执行工具调用
-pub async fn execute_tool_call(tool_call: &ToolCall) -> anyhow::Result<String> {
+/// 执行工具调用（bookId 由调用方自动注入）
+pub async fn execute_tool_call(tool_call: &ToolCall, book_id: &str) -> anyhow::Result<String> {
     log::info!("执行工具调用: {}", tool_call.name);
     log::debug!("工具参数: {}", tool_call.arguments);
 
     match tool_call.name.as_str() {
+        // 书籍信息工具
+        "get_book_info" => {
+            let book = crate::services::book_service::load_book(book_id.to_string()).await?;
+            let volumes_text: String = book.volumes.iter()
+                .map(|v| {
+                    let ch_count = book.chapters.iter().filter(|c| c.volume_id == v.id).count();
+                    format!("- {}（{}章，ID: {}）", v.title, ch_count, v.id)
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let result = format!(
+                "书名：{}\n作者：{}\n简介：{}\n卷数：{}\n章节数：{}\n总字数：{}\n\n卷列表：\n{}",
+                book.title,
+                if book.author.is_empty() { "未设置" } else { &book.author },
+                if book.description.is_empty() { "暂无简介" } else { &book.description },
+                book.volumes.len(),
+                book.chapters.len(),
+                book.chapters.iter().map(|c| c.word_count).sum::<i64>(),
+                if volumes_text.is_empty() { "暂无卷" } else { &volumes_text }
+            );
+            Ok(result)
+        }
         // 章节相关工具
         "list_all_chapters" => {
-            let book_id = tool_call.arguments.get("bookId")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("缺少 bookId 参数"))?;
             let chapters = get_all_chapter_summaries_for_tool(book_id).await?;
             Ok(serde_json::to_string(&chapters)?)
         }
@@ -81,9 +100,6 @@ pub async fn execute_tool_call(tool_call: &ToolCall) -> anyhow::Result<String> {
 
         // 角色卡相关工具
         "create_character_card" => {
-            let book_id = tool_call.arguments.get("bookId")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("缺少 bookId 参数"))?;
             let name = tool_call.arguments.get("name")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("缺少 name 参数"))?;
@@ -116,9 +132,6 @@ pub async fn execute_tool_call(tool_call: &ToolCall) -> anyhow::Result<String> {
             Ok(serde_json::to_string(&card)?)
         }
         "list_character_cards" => {
-            let book_id = tool_call.arguments.get("bookId")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("缺少 bookId 参数"))?;
             let cards = crate::services::character_service::list_character_cards(book_id.to_string()).await?;
             Ok(serde_json::to_string(&cards)?)
         }
@@ -150,10 +163,6 @@ pub async fn execute_tool_call(tool_call: &ToolCall) -> anyhow::Result<String> {
 
         // 大纲相关工具
         "save_outline" => {
-            let book_id = tool_call.arguments.get("bookId")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("缺少 bookId 参数"))?
-                .to_string();
             let outline_type = tool_call.arguments.get("outlineType")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("缺少 outlineType 参数"))?
@@ -167,7 +176,7 @@ pub async fn execute_tool_call(tool_call: &ToolCall) -> anyhow::Result<String> {
             let chapter_id = tool_call.arguments.get("chapterId").and_then(|v| v.as_str()).map(|s| s.to_string());
 
             crate::services::outline_service::save_outline(
-                book_id, volume_id, chapter_id, outline_type, content
+                book_id.to_string(), volume_id, chapter_id, outline_type, content
             ).await?;
             Ok("{\"success\": true}".to_string())
         }
@@ -175,17 +184,12 @@ pub async fn execute_tool_call(tool_call: &ToolCall) -> anyhow::Result<String> {
             // 优先使用 chapterId 查询，如果没有则使用 outlineId
             if let Some(chapter_id) = tool_call.arguments.get("chapterId").and_then(|v| v.as_str()) {
                 // 通过 chapterId 获取该章节的所有大纲（粗纲和细纲）
-                let book_id = tool_call.arguments.get("bookId")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("使用 chapterId 查询时需要 bookId 参数"))?
-                    .to_string();
-
                 let coarse = crate::services::outline_service::get_outline_by_level(
-                    book_id.clone(), None, Some(chapter_id.to_string()), "coarse".to_string()
+                    book_id.to_string(), None, Some(chapter_id.to_string()), "coarse".to_string()
                 ).await.ok();
 
                 let fine = crate::services::outline_service::get_outline_by_level(
-                    book_id, None, Some(chapter_id.to_string()), "fine".to_string()
+                    book_id.to_string(), None, Some(chapter_id.to_string()), "fine".to_string()
                 ).await.ok();
 
                 let result = serde_json::json!({
@@ -205,15 +209,12 @@ pub async fn execute_tool_call(tool_call: &ToolCall) -> anyhow::Result<String> {
 
         // 写作风格相关工具
         "learn_writing_style" => {
-            let book_id = tool_call.arguments.get("bookId")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
             let force = tool_call.arguments.get("force")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
 
             let params = crate::models::LearnStyleParams {
-                book_id,
+                book_id: Some(book_id.to_string()),
                 chapter_ids: None,
                 force_relearn: force,
             };
@@ -261,9 +262,6 @@ pub async fn execute_tool_call(tool_call: &ToolCall) -> anyhow::Result<String> {
                         chapter_id, matches.len(), matches.join("\n")))
                 }
             } else {
-                let book_id = tool_call.arguments.get("bookId")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("搜索全书时需要 bookId 参数"))?;
                 let chapters = crate::services::book_service::load_book(book_id.to_string()).await?;
                 let mut result = String::new();
                 let mut total_all = 0;
@@ -290,24 +288,15 @@ pub async fn execute_tool_call(tool_call: &ToolCall) -> anyhow::Result<String> {
 
         // 故事记忆相关工具
         "get_story_memory" => {
-            let book_id = tool_call.arguments.get("bookId")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("缺少 bookId 参数"))?;
             crate::services::story_memory_service::build_story_memory_text(book_id).await
         }
         "get_character_timeline" => {
-            let book_id = tool_call.arguments.get("bookId")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("缺少 bookId 参数"))?;
             let name = tool_call.arguments.get("characterName")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("缺少 characterName 参数"))?;
             crate::services::story_memory_service::build_character_timeline(book_id, name).await
         }
         "list_chapters_in_volume" => {
-            let book_id = tool_call.arguments.get("bookId")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("缺少 bookId 参数"))?;
             let volume_id = tool_call.arguments.get("volumeId")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("缺少 volumeId 参数"))?;
@@ -347,26 +336,40 @@ pub async fn execute_tool_call(tool_call: &ToolCall) -> anyhow::Result<String> {
         }
 
         "get_volume_outline" => {
-            let book_id = tool_call.arguments.get("bookId")
+            let volume_name = tool_call.arguments.get("volumeName")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("缺少 bookId 参数"))?;
-            let volume_id = tool_call.arguments.get("volumeId")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("缺少 volumeId 参数"))?;
+                .ok_or_else(|| anyhow::anyhow!("缺少 volumeName 参数"))?;
             let outline_type = tool_call.arguments.get("outlineType")
                 .and_then(|v| v.as_str())
                 .unwrap_or("coarse");
+
+            // 通过卷名查找卷ID
+            let book = crate::services::book_service::load_book(book_id.to_string()).await?;
+            let volume_id = book.volumes.iter()
+                .find(|v| v.title == volume_name)
+                .map(|v| v.id.as_str());
+
+            let volume_id = match volume_id {
+                Some(id) => id,
+                None => {
+                    let available = book.volumes.iter()
+                        .map(|v| v.title.as_str())
+                        .collect::<Vec<_>>()
+                        .join("、");
+                    return Ok(format!("未找到名为「{}」的卷。可用卷名：{}", volume_name, if available.is_empty() { "暂无" } else { &available }))
+                }
+            };
 
             let outline = crate::services::outline_service::get_outline_by_level(
                 book_id.to_string(),
                 Some(volume_id.to_string()),
                 None,
                 outline_type.to_string()
-            ).await.ok();
+            ).await?;
 
             match outline {
-                Some(o) => Ok(serde_json::to_string(&o)?),
-                None => Ok(format!("未找到该卷的{}大纲", if outline_type == "coarse" { "粗" } else { "细" }))
+                Some(o) => Ok(format!("「{}」{}大纲：\n{}", volume_name, if outline_type == "coarse" { "粗" } else { "细" }, o.content)),
+                None => Ok(format!("「{}」未找到{}大纲", volume_name, if outline_type == "coarse" { "粗" } else { "细" }))
             }
         }
 
@@ -394,10 +397,6 @@ pub async fn execute_tool_call(tool_call: &ToolCall) -> anyhow::Result<String> {
         }
 
         "create_chapter" => {
-            let book_id = tool_call.arguments.get("bookId")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("缺少 bookId 参数"))?;
-
             // 获取volume_id：如果指定了就用指定的，否则用最后一卷
             let volume_id = if let Some(vid) = tool_call.arguments.get("volumeId").and_then(|v| v.as_str()) {
                 vid.to_string()

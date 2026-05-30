@@ -2,6 +2,7 @@
 import { ref, onMounted } from 'vue';
 import { useBookStore } from '../stores/book';
 import { useConfigStore } from '../stores/config';
+import { invoke } from '@tauri-apps/api/core';
 import { Setting, Plus, Delete, Collection, Document, EditPen } from '@element-plus/icons-vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 
@@ -12,6 +13,12 @@ const showCreateDialog = ref(false);
 const newBookTitle = ref('');
 const newBookAuthor = ref('');
 const newBookDescription = ref('');
+
+const showEditDialog = ref(false);
+const editingBookId = ref('');
+const editBookTitle = ref('');
+const editBookAuthor = ref('');
+const editBookDescription = ref('');
 
 onMounted(async () => {
   await configStore.init();
@@ -52,6 +59,35 @@ const handleDeleteBook = async (bookId: string) => {
     ElMessage.success('书籍已删除');
   } catch {
     // 用户取消
+  }
+};
+
+const openEditDialog = (book: any) => {
+  editingBookId.value = book.id;
+  editBookTitle.value = book.title;
+  editBookAuthor.value = book.author || '';
+  editBookDescription.value = book.description || '';
+  showEditDialog.value = true;
+};
+
+const confirmEditBook = async () => {
+  if (!editBookTitle.value.trim()) {
+    ElMessage.warning('请输入书名');
+    return;
+  }
+
+  try {
+    await invoke('update_book', {
+      bookId: editingBookId.value,
+      title: editBookTitle.value.trim(),
+      author: editBookAuthor.value.trim(),
+      description: editBookDescription.value.trim(),
+    });
+    showEditDialog.value = false;
+    ElMessage.success('书籍信息已更新');
+    await bookStore.updateBooksList();
+  } catch (error) {
+    ElMessage.error('更新失败：' + error);
   }
 };
 
@@ -120,14 +156,23 @@ const formatDate = (timestamp: number) => {
                 <span class="update-date">{{ formatDate(book.updatedAt) }} 更新</span>
               </p>
             </div>
-            <el-button
-              class="delete-btn"
-              circle
-              size="small"
-              type="danger"
-              :icon="Delete"
-              @click.stop="handleDeleteBook(book.id)"
-            />
+            <div class="book-actions">
+              <el-button
+                class="edit-btn"
+                circle
+                size="small"
+                :icon="EditPen"
+                @click.stop="openEditDialog(book)"
+              />
+              <el-button
+                class="delete-btn"
+                circle
+                size="small"
+                type="danger"
+                :icon="Delete"
+                @click.stop="handleDeleteBook(book.id)"
+              />
+            </div>
           </div>
 
           <!-- 创建新书卡片 -->
@@ -200,6 +245,50 @@ const formatDate = (timestamp: number) => {
           size="large"
         >
           创建
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 编辑书籍对话框 -->
+    <el-dialog
+      v-model="showEditDialog"
+      title="编辑书籍信息"
+      width="520px"
+      destroy-on-close
+      class="create-book-dialog"
+    >
+      <el-form label-position="top" class="create-form">
+        <el-form-item label="书名">
+          <el-input
+            v-model="editBookTitle"
+            placeholder="给你的作品起个名字"
+            @keyup.enter="confirmEditBook"
+            autofocus
+            size="large"
+          />
+        </el-form-item>
+        <el-form-item label="作者">
+          <el-input v-model="editBookAuthor" placeholder="你的名字" size="large" />
+        </el-form-item>
+        <el-form-item label="简介">
+          <el-input
+            v-model="editBookDescription"
+            type="textarea"
+            :rows="4"
+            placeholder="简单描述一下这本书的内容..."
+            resize="none"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showEditDialog = false" size="large">取消</el-button>
+        <el-button 
+          type="primary" 
+          @click="confirmEditBook" 
+          :disabled="!editBookTitle.trim()"
+          size="large"
+        >
+          保存
         </el-button>
       </template>
     </el-dialog>
@@ -409,14 +498,21 @@ const formatDate = (timestamp: number) => {
   border-radius: 12px;
 }
 
-.delete-btn {
+.book-actions {
   position: absolute;
   top: var(--nw-space);
   right: var(--nw-space);
+  display: flex;
+  gap: var(--nw-space-xs);
+}
+
+.edit-btn,
+.delete-btn {
   opacity: 0;
   transition: opacity var(--nw-transition-fast);
 }
 
+.book-card:hover .edit-btn,
 .book-card:hover .delete-btn {
   opacity: 1;
 }

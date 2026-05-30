@@ -6,7 +6,7 @@
 
 **Byakko Writer** — 专为小说创作者设计的 AI 辅助写作工具
 
-[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](https://github.com/xiaofei114/Byakko-Writer/releases)
+[![Version](https://img.shields.io/badge/version-0.0.5-beta/badge.svg)](https://github.com/xiaofei114/Byakko-Writer/releases)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Tauri](https://img.shields.io/badge/Tauri-2.0-FFC131?logo=tauri)](https://tauri.app)
 [![Vue](https://img.shields.io/badge/Vue-3.5-4FC08D?logo=vue.js)](https://vuejs.org)

@@ -8,8 +8,8 @@ mod db;
 
 use commands::{
     // 书籍相关命令
-    create_book, get_books_list, load_book, save_book, delete_book,
-    create_volume, delete_volume,
+    create_book, get_books_list, load_book, save_book, delete_book, update_book,
+    create_volume, delete_volume, update_volume_title,
     create_chapter, delete_chapter,
     load_chapter_content, save_chapter_content, update_chapter_title, apply_line_edit,
     // AI 相关命令
@@ -73,9 +73,11 @@ fn main() {
             load_book,
             save_book,
             delete_book,
+            update_book,
             // 卷
             create_volume,
             delete_volume,
+            update_volume_title,
             // 章节
             create_chapter,
             delete_chapter,

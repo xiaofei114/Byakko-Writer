@@ -220,6 +220,14 @@ async fn create_tables(pool: &DbPool) -> anyhow::Result<()> {
     let _ = sqlx::query("ALTER TABLE chat_messages ADD COLUMN handled_status TEXT")
         .execute(pool)
         .await;
+
+    // 迁移：为 books 表添加 author 和 description 字段
+    let _ = sqlx::query("ALTER TABLE books ADD COLUMN author TEXT NOT NULL DEFAULT ''")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE books ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+        .execute(pool)
+        .await;
     
     // 创建索引
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_volumes_book_id ON volumes(book_id)")

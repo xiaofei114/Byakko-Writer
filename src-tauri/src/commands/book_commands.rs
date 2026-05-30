@@ -20,6 +20,8 @@ pub async fn get_books_list() -> Result<Vec<serde_json::Value>, String> {
             serde_json::json!({
                 "id": book.id,
                 "title": book.title,
+                "author": book.author,
+                "description": book.description,
                 "updated_at": book.updated_at
             })
         })
@@ -46,6 +48,12 @@ pub async fn delete_book(book_id: String) -> Result<(), String> {
     book_service::delete_book(book_id).await.map_err(|e| e.to_string())
 }
 
+/// 更新书籍信息
+#[tauri::command]
+pub async fn update_book(book_id: String, title: String, author: String, description: String) -> Result<(), String> {
+    book_service::update_book(book_id, title, author, description).await.map_err(|e| e.to_string())
+}
+
 /// 创建卷
 #[tauri::command]
 pub async fn create_volume(book_id: String, title: String) -> Result<serde_json::Value, String> {
@@ -65,6 +73,12 @@ pub async fn create_volume(book_id: String, title: String) -> Result<serde_json:
 #[tauri::command]
 pub async fn delete_volume(volume_id: String) -> Result<(), String> {
     book_service::delete_volume(volume_id).await.map_err(|e| e.to_string())
+}
+
+/// 更新卷标题
+#[tauri::command]
+pub async fn update_volume_title(volume_id: String, title: String) -> Result<(), String> {
+    book_service::update_volume_title(volume_id, title).await.map_err(|e| e.to_string())
 }
 
 /// 创建章节
