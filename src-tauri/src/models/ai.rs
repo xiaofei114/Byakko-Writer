@@ -200,4 +200,8 @@ pub struct StreamEvent {
     pub tool_display_name: Option<String>,
     #[serde(rename = "toolParams")]
     pub tool_params: Option<serde_json::Value>,
+    #[serde(rename = "isError", default)]
+    pub is_error: bool,
+    #[serde(rename = "errorMessage", skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
 }

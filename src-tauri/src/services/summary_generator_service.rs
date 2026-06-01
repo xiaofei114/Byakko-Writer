@@ -273,75 +273,6 @@ pub async fn generate_missing_summaries_background(
     })
 }
 
-/// 批量生成指定章节的摘要（带并发限制）
-pub async fn batch_generate_summaries(
-    chapter_ids: Vec<String>,
-    config: AIConfig,
-    max_concurrent: usize,
-) -> anyhow::Result<SummaryGenerationResult> {
-    let total = chapter_ids.len();
-    
-    if total == 0 {
-        return Ok(SummaryGenerationResult {
-            total: 0,
-            success: 0,
-            failed: 0,
-            skipped: 0,
-            message: "没有需要生成摘要的章节".to_string(),
-        });
-    }
-    
-    log::info!("[SummaryGenerator] 批量生成 {} 个章节摘要, 并发数: {}", total, max_concurrent);
-    
-    use futures::stream::{self, StreamExt};
-    
-    let results = stream::iter(chapter_ids)
-        .map(|chapter_id| {
-            let config = config.clone();
-            async move {
-                // 检查是否已在生成中
-                if is_generating(&chapter_id) {
-                    return (chapter_id, false, true); // skipped
-                }
-                
-                // 检查是否已有摘要
-                if has_summary(&chapter_id).await.unwrap_or(false) {
-                    return (chapter_id, false, true); // skipped
-                }
-                
-                match generate_chapter_summary_with_lock(chapter_id.clone(), config).await {
-                    Ok(_) => (chapter_id, true, false),
-                    Err(e) => {
-                        log::error!("[SummaryGenerator] 生成失败 {}: {}", chapter_id, e);
-                        (chapter_id, false, false)
-                    }
-                }
-            }
-        })
-        .buffer_unordered(max_concurrent)
-        .collect::<Vec<_>>()
-        .await;
-    
-    let success = results.iter().filter(|(_, s, _)| *s).count();
-    let skipped = results.iter().filter(|(_, _, sk)| *sk).count();
-    let failed = total - success - skipped;
-    
-    let message = format!(
-        "批量生成完成: 总计 {}, 成功 {}, 失败 {}, 跳过 {}",
-        total, success, failed, skipped
-    );
-    
-    log::info!("[SummaryGenerator] {}", message);
-    
-    Ok(SummaryGenerationResult {
-        total,
-        success,
-        failed,
-        skipped,
-        message,
-    })
-}
-
 /// 生成结果
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SummaryGenerationResult {
@@ -350,25 +281,6 @@ pub struct SummaryGenerationResult {
     pub failed: usize,
     pub skipped: usize,
     pub message: String,
-}
-
-/// 获取生成状态
-pub fn get_generation_status() -> GenerationStatus {
-    let count = GENERATING_CHAPTERS.lock()
-        .map(|set| set.len())
-        .unwrap_or(0);
-    
-    GenerationStatus {
-        active_generations: count,
-        is_busy: count > 0,
-    }
-}
-
-/// 生成状态
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct GenerationStatus {
-    pub active_generations: usize,
-    pub is_busy: bool,
 }
 
 /// 为 Story Bible 生成器提供的简化接口

@@ -3,11 +3,13 @@ import { ref, nextTick, onMounted, onUnmounted, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { useBookStore } from '../stores/book';
 import { useConfigStore } from '../stores/config';
-import { sendChatMessageStream, sendPolishRequest, getChatSessions, deleteChatSession, getChatHistory, updateMessagePolishHandled, updateLineEditHandledStatus, type AgentPhaseEvent } from '../api/aiChat';
-import type { AIChatMessage, ChatSession } from '../types';
+import { sendChatMessageStream, sendPolishRequest, getChatSessions, deleteChatSession, getChatHistory, updateMessagePolishHandled, updateLineEditHandledStatus } from '../api/aiChat';
+import type { AIChatMessage, ChatSession, AgentPhaseEvent } from '../types';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { listen } from '@tauri-apps/api/event';
 import { marked } from 'marked';
+import { TOOL_DISPLAY_NAMES } from '../config/appConfig';
+import { showError, showSimpleError } from '../utils/errorHandler';
 import { Delete, Close, UserFilled, Cpu, Promotion, Plus, ArrowDown, Check, Close as CloseIcon, QuestionFilled } from '@element-plus/icons-vue';
 import { ElMessage, ElMessageBox, ElNotification } from 'element-plus';
 import { getPolishRequest, clearPolishRequest } from '../utils/eventBus';
@@ -469,6 +471,7 @@ const handleSend = async () => {
             dataChangeUnlisten.value();
             dataChangeUnlisten.value = null;
           }
+          showError(error, { title: 'AI 请求失败' });
           ElNotification({ title: 'AI 请求失败', message: error, type: 'error', duration: 0 });
         }
       }
@@ -500,7 +503,7 @@ const handlePolishRequest = async (request: import('../utils/eventBus').PolishRe
   currentPolishOriginalText = request.text;
 
   if (!bookStore.currentBook) {
-    ElMessage.error('没有打开的书籍');
+    showSimpleError('没有打开的书籍');
     return;
   }
 
@@ -568,7 +571,7 @@ const handlePolishRequest = async (request: import('../utils/eventBus').PolishRe
             streamUnlisten.value();
             streamUnlisten.value = null;
           }
-          ElNotification({ title: '润色请求失败', message: error, type: 'error', duration: 0 });
+          showError(error, { title: '润色请求失败' });
         }
       }
     );
@@ -673,7 +676,7 @@ const applyWrite = async (msg: AIChatMessage) => {
     ElMessage.success('内容已保存');
     await bookStore.loadBook(bookStore.currentBook.id);
   } catch (e) {
-    ElMessage.error('保存失败: ' + e);
+    showSimpleError('保存失败: ' + e);
   }
 };
 
@@ -712,7 +715,7 @@ const applyOutline = async (msg: AIChatMessage, chapterId: string, outlineType: 
     
     ElMessage.success(outlineType === 'coarse' ? '粗纲已保存' : '细纲已保存');
   } catch (error) {
-    ElMessage.error('保存大纲失败');
+    showSimpleError(error);
   }
 };
 
@@ -756,19 +759,22 @@ const buildToolDisplayText = (toolName: string, displayName: string, params?: Re
     return ch ? `「${ch.title}」` : '';
   };
 
+  const baseName = TOOL_DISPLAY_NAMES[toolName] || displayName;
+
+  // 需要动态拼接参数的工具
   switch (toolName) {
     case 'query_chapter_summary':
       return params?.chapterId
         ? `查询${findChapterTitle(params.chapterId)}摘要`
-        : displayName;
+        : baseName;
     case 'search_chapter_content': {
-      if (!params?.keyword) return displayName;
+      if (!params?.keyword) return baseName;
       const title = params.chapterId ? (findChapterTitle(params.chapterId) || '章节') : '全书';
       const mode = params.regex ? '正则' : '';
       return `在${title}${mode}搜索「${params.keyword}」`;
     }
     case 'query_chapter_content': {
-      if (!params?.chapterId) return displayName;
+      if (!params?.chapterId) return baseName;
       const title = findChapterTitle(params.chapterId) || `章节`;
       const start = params.startLine as number | undefined;
       const end = params.endLine as number | undefined;
@@ -781,18 +787,18 @@ const buildToolDisplayText = (toolName: string, displayName: string, params?: Re
     case 'get_outline':
       return params?.chapterId
         ? `获取${findChapterTitle(params.chapterId)}大纲`
-        : displayName;
+        : baseName;
     case 'get_volume_outline': {
       const volTitle = params?.volumeId ? `卷${params.volumeId}` : '卷';
       const typeLabel = params?.outlineType === 'fine' ? '细纲' : '粗纲';
       return `获取${volTitle}${typeLabel}`;
     }
     case 'create_chapter':
-      return params?.title ? `创建章节「${params.title}」` : '创建新章节';
+      return params?.title ? `创建章节「${params.title}」` : baseName;
     case 'get_character_card':
-      return params?.name ? `查询角色「${params.name}」详情` : '查询角色详情';
+      return params?.name ? `查询角色「${params.name}」详情` : baseName;
     case 'create_character_card':
-      return params?.name ? `创建角色「${params.name}」` : displayName;
+      return params?.name ? `创建角色「${params.name}」` : baseName;
     case 'write_chapter': {
       const chTitle = params?.chapterId ? findChapterTitle(params.chapterId) : '章节';
       const desc = params?.description ? `：${params.description}` : '';
@@ -809,30 +815,11 @@ const buildToolDisplayText = (toolName: string, displayName: string, params?: Re
       return `提议修改${chTitle}${lineNum}`;
     }
     case 'ask_user':
-      return params?.question ? `询问：${params.question}` : '询问用户';
-    case 'list_all_chapters':
-      return '获取书籍章节列表';
-    case 'list_character_cards':
-      return '获取角色列表';
-    case 'get_book_info':
-      return '获取书籍信息';
-    case 'get_volume_outline': {
-      const volTitle = params?.volumeName || '未知卷';
-      const typeLabel = params?.outlineType === 'fine' ? '细纲' : '粗纲';
-      return `获取${volTitle}${typeLabel}`;
-    }
-    case 'get_story_memory':
-      return '获取故事记忆';
+      return params?.question ? `询问：${params.question}` : baseName;
     case 'get_character_timeline':
-      return params?.characterName ? `获取角色「${params.characterName}」时间线` : '获取角色时间线';
-    case 'list_chapters_in_volume':
-      return '获取卷内章节';
-    case 'learn_writing_style':
-      return '学习写作风格';
-    case 'report_conflict':
-      return '报告设定冲突';
+      return params?.characterName ? `获取角色「${params.characterName}」时间线` : baseName;
     default:
-      return displayName;
+      return baseName;
   }
 };
 
@@ -958,11 +945,11 @@ const handleAskUserSelect = async (msg: AIChatMessage, option: string) => {
   // 获取 bookId
   const bookId = msg.bookId || bookStore.currentBook?.id;
   if (!bookId) {
-    ElMessage.error('无法确定书籍ID，请重新打开对话');
+    showSimpleError('无法确定书籍ID，请重新打开对话');
     return;
   }
   if (!bookStore.currentBook || bookStore.currentBook.id !== bookId) {
-    ElMessage.error('请先打开对应的书籍');
+    showSimpleError('请先打开对应的书籍');
     return;
   }
 
@@ -996,11 +983,11 @@ const handleAskUserInput = async (msg: AIChatMessage) => {
   // 获取 bookId
   const bookId = msg.bookId || bookStore.currentBook?.id;
   if (!bookId) {
-    ElMessage.error('无法确定书籍ID，请重新打开对话');
+    showSimpleError('无法确定书籍ID，请重新打开对话');
     return;
   }
   if (!bookStore.currentBook || bookStore.currentBook.id !== bookId) {
-    ElMessage.error('请先打开对应的书籍');
+    showSimpleError('请先打开对应的书籍');
     return;
   }
 

@@ -1,26 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import type { AIConfig, AIChatMessage, ChatSession } from '../types';
-
-export interface StreamEvent {
-  sessionId: string;
-  chunk: string;
-  isComplete: boolean;
-  isToolCall: boolean;
-  toolName?: string;
-  toolDisplayName?: string;
-  toolParams?: Record<string, any>;
-  sessionStarted?: boolean;
-}
-
-// Agent 阶段事件
-export interface AgentPhaseEvent {
-  type: 'phase_start' | 'phase_complete' | 'tool_call' | 'tool_result';
-  sessionId: string;
-  phase?: 'intent' | 'tool' | 'writing' | 'outlining' | 'polishing';
-  message?: string;
-  result?: string;
-}
+import type { AIConfig, AIChatMessage, ChatSession, StreamEvent, AgentPhaseEvent } from '../types';
 
 export interface ChatStreamCallbacks {
   onChunk: (chunk: string) => void;
@@ -57,6 +37,13 @@ export async function sendChatMessageStream(
     // sessionStarted 表示会话已创建，更新 sessionId 但不结束对话
     if (data.sessionStarted && data.sessionId) {
       callbacks.onSessionStarted?.(data.sessionId);
+      return;
+    }
+
+    // 错误事件
+    if (data.isError && data.errorMessage) {
+      isCompleted = true;
+      callbacks.onError(data.errorMessage);
       return;
     }
 
@@ -172,6 +159,13 @@ export async function sendPolishRequest(
   // 设置流式事件监听
   const unlistenStream = await listen<StreamEvent>('ai-chat-stream', (event) => {
     const data = event.payload;
+
+    // 错误事件
+    if (data.isError && data.errorMessage) {
+      isCompleted = true;
+      callbacks.onError(data.errorMessage);
+      return;
+    }
 
     if (data.isComplete) {
       isCompleted = true;

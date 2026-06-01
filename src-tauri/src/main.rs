@@ -11,10 +11,9 @@ use commands::{
     create_book, get_books_list, load_book, save_book, delete_book, update_book,
     create_volume, delete_volume, update_volume_title,
     create_chapter, delete_chapter,
-    load_chapter_content, save_chapter_content, update_chapter_title, apply_line_edit,
+    load_chapter_content, save_chapter_content, update_chapter_title,
     // AI 相关命令
     generate_chapter_summary, load_chapter_summary,
-    batch_generate_chapter_summaries, generate_missing_summaries, get_summary_generation_status,
     send_chat_message_stream, get_chat_history, get_chat_sessions, delete_chat_session, update_message_polish_handled, update_line_edit_handled_status, send_polish_request,
     // 快照相关命令
     create_chapter_snapshot, list_chapter_snapshots, get_chapter_snapshot,
@@ -24,7 +23,7 @@ use commands::{
     update_character_card, delete_character_card, search_character_cards,
     // 大纲相关命令
     save_outline, get_outline, get_outline_by_level, list_book_outlines,
-    list_volume_outlines, list_chapter_outlines, delete_outline, get_outline_stats,
+    list_volume_outlines, list_chapter_outlines, delete_outline,
     // 配置相关命令
     load_config, save_config,
     // 写作风格相关命令
@@ -33,7 +32,7 @@ use commands::{
     trigger_style_analysis,
     // 冲突检测相关命令
     run_conflict_detection, ignore_conflict, unignore_conflict, delete_conflict,
-    get_active_conflicts, get_all_conflicts, get_conflict_detection_status,
+    get_all_conflicts,
     // 故事记忆相关命令
     get_story_memory, update_story_memory, get_story_memory_text, force_regenerate_story_memory,
 };
@@ -85,16 +84,12 @@ fn main() {
             load_chapter_content,
             save_chapter_content,
             update_chapter_title,
-            apply_line_edit,
             // 配置
             load_config,
             save_config,
             // AI 摘要
             generate_chapter_summary,
             load_chapter_summary,
-            batch_generate_chapter_summaries,
-            generate_missing_summaries,
-            get_summary_generation_status,
             // AI 聊天
             send_chat_message_stream,
             get_chat_history,
@@ -125,7 +120,6 @@ fn main() {
             list_volume_outlines,
             list_chapter_outlines,
             delete_outline,
-            get_outline_stats,
             // 写作风格
             learn_writing_style,
             get_style_prompt,
@@ -139,9 +133,7 @@ fn main() {
             ignore_conflict,
             unignore_conflict,
             delete_conflict,
-            get_active_conflicts,
             get_all_conflicts,
-            get_conflict_detection_status,
             // 故事记忆
             get_story_memory,
             update_story_memory,

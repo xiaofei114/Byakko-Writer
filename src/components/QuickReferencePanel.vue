@@ -208,7 +208,7 @@ onMounted(() => {
               <div class="section-title">关系</div>
               <div class="section-content">
                 <div v-for="(rel, index) in selectedCharacter.relationships" :key="index" class="relation-item">
-                  <span class="rel-name">{{ rel.target_name }}</span>
+                  <span class="rel-name">{{ rel.targetName }}</span>
                   <span class="rel-type">{{ rel.relationship }}</span>
                 </div>
               </div>

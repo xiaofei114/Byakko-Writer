@@ -2,6 +2,7 @@
 import { ref, watch } from 'vue';
 import { useConfigStore } from '../stores/config';
 import { useBookStore } from '../stores/book';
+import { showSimpleError } from '../utils/errorHandler';
 import {
   Setting,
   Grid,
@@ -18,6 +19,7 @@ import {
 import { ElMessage } from 'element-plus';
 import { getStoryMemoryText, updateStoryMemory, forceRegenerateStoryMemory } from '../api/storyMemory';
 import type { StoryMemoryUpdateResult } from '../types';
+import { FONT_OPTIONS, THEME_OPTIONS, AI_PROVIDER_PRESETS, AI_PROVIDERS } from '../config/appConfig';
 
 const configStore = useConfigStore();
 const bookStore = useBookStore();
@@ -41,10 +43,10 @@ const handleForceRegenerate = async () => {
       ElMessage.success('故事记忆已强制重新生成');
       await loadStoryMemory();
     } else {
-      ElMessage.error(storyMemoryResult.value.message);
+      showSimpleError(storyMemoryResult.value.message);
     }
   } catch (e) {
-    ElMessage.error(`强制重新生成失败: ${e}`);
+    showSimpleError(e);
   } finally {
     storyMemoryLoading.value = false;
   }
@@ -72,10 +74,10 @@ const handleRefreshStoryMemory = async () => {
       ElMessage.success(storyMemoryResult.value.message);
       await loadStoryMemory();
     } else {
-      ElMessage.error(storyMemoryResult.value.message);
+      showSimpleError(storyMemoryResult.value.message);
     }
   } catch (e) {
-    ElMessage.error(`更新失败: ${e}`);
+    showSimpleError(e);
   } finally {
     storyMemoryLoading.value = false;
   }
@@ -95,92 +97,9 @@ watch(activeTab, (tab) => {
   }
 });
 
-const themes = [
-  { value: 'light', label: '浅色' },
-  { value: 'dark', label: '深色' },
-  { value: 'auto', label: '跟随系统' }
-];
-
-const fonts = [
-  { value: 'system', label: '系统默认' },
-  { value: 'LXGWWenKai', label: '霞鹜文楷' },
-  { value: 'NotoSerifCJK', label: '思源宋体' },
-  { value: 'PingFang', label: '苹方' },
-  { value: 'MicrosoftYaHei', label: '微软雅黑' },
-  { value: 'SourceHanSans', label: '思源黑体' },
-];
-
-// AI 提供商配置预设
-const aiProviderPresets: Record<string, {
-  name: string;
-  apiUrl: string;
-  model: string;
-  help?: string;
-  keyUrl: string;
-  showApiUrl?: boolean;
-}> = {
-  deepseek: {
-    name: 'DeepSeek',
-    apiUrl: 'https://api.deepseek.com/v1',
-    model: 'deepseek-chat',
-    help: 'DeepSeek 官方 API，价格便宜效果好',
-    keyUrl: 'https://platform.deepseek.com/'
-  },
-  openai: {
-    name: 'OpenAI',
-    apiUrl: 'https://api.openai.com/v1',
-    model: 'gpt-3.5-turbo',
-    help: 'OpenAI 官方 API，需要海外支付方式',
-    keyUrl: 'https://platform.openai.com/api-keys'
-  },
-  aliyun: {
-    name: '阿里云 (通义千问)',
-    apiUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-    model: 'qwen-turbo',
-    help: '阿里云灵积平台，国内访问稳定',
-    keyUrl: 'https://dashscope.console.aliyun.com/apiKey'
-  },
-  moonshot: {
-    name: '月之暗面 (Kimi)',
-    apiUrl: 'https://api.moonshot.cn/v1',
-    model: 'moonshot-v1-8k',
-    help: 'Kimi 长文本模型，支持超长上下文',
-    keyUrl: 'https://platform.moonshot.cn/'
-  },
-  zhipu: {
-    name: '智谱AI (GLM)',
-    apiUrl: 'https://open.bigmodel.cn/api/paas/v4',
-    model: 'glm-4-flash',
-    help: '智谱清言，国内大模型，有免费额度',
-    keyUrl: 'https://open.bigmodel.cn/usercenter/apikeys'
-  },
-  ollama: {
-    name: 'Ollama (本地)',
-    apiUrl: 'http://localhost:11434/v1',
-    model: 'llama3.2',
-    help: '本地运行开源模型，无需联网和 API 密钥',
-    keyUrl: 'https://ollama.com/',
-    showApiUrl: true
-  },
-  custom: {
-    name: '自定义',
-    apiUrl: '',
-    model: '',
-    help: '其他兼容 OpenAI 格式的 API',
-    keyUrl: '',
-    showApiUrl: true
-  }
-};
-
-const aiProviders = Object.entries(aiProviderPresets).map(([value, config]) => ({
-  value,
-  label: config.name,
-  ...config
-}));
-
 // 切换提供商时自动填充预设值
 const onProviderChange = (provider: string) => {
-  const preset = aiProviderPresets[provider];
+  const preset = AI_PROVIDER_PRESETS[provider];
   if (preset && provider !== 'custom') {
     configStore.config.ai.apiUrl = preset.apiUrl;
     configStore.config.ai.model = preset.model;
@@ -240,7 +159,7 @@ const onFontChange = () => {
               style="width: 160px"
             >
               <el-option
-                v-for="theme in themes"
+                v-for="theme in THEME_OPTIONS"
                 :key="theme.value"
                 :label="theme.label"
                 :value="theme.value"
@@ -264,7 +183,7 @@ const onFontChange = () => {
               style="width: 180px"
             >
               <el-option
-                v-for="font in fonts"
+                v-for="font in FONT_OPTIONS"
                 :key="font.value"
                 :label="font.label"
                 :value="font.value"
@@ -349,7 +268,7 @@ const onFontChange = () => {
               style="width: 280px"
             >
               <el-option
-                v-for="provider in aiProviders"
+                v-for="provider in AI_PROVIDERS"
                 :key="provider.value"
                 :label="provider.label"
                 :value="provider.value"
@@ -357,9 +276,9 @@ const onFontChange = () => {
             </el-select>
           </div>
 
-          <div class="form-help" v-if="aiProviderPresets[configStore.config.ai.provider]?.help">
+          <div class="form-help" v-if="AI_PROVIDER_PRESETS[configStore.config.ai.provider]?.help">
             <el-icon><InfoFilled /></el-icon>
-            <span>{{ aiProviderPresets[configStore.config.ai.provider].help }}</span>
+            <span>{{ AI_PROVIDER_PRESETS[configStore.config.ai.provider].help }}</span>
           </div>
 
           <div class="form-row" v-if="configStore.config.ai.provider !== 'ollama'">
@@ -374,9 +293,9 @@ const onFontChange = () => {
             />
           </div>
 
-          <div class="form-link" v-if="aiProviderPresets[configStore.config.ai.provider]?.keyUrl">
+          <div class="form-link" v-if="AI_PROVIDER_PRESETS[configStore.config.ai.provider]?.keyUrl">
             <a
-              :href="aiProviderPresets[configStore.config.ai.provider].keyUrl"
+              :href="AI_PROVIDER_PRESETS[configStore.config.ai.provider].keyUrl"
               target="_blank"
               rel="noopener noreferrer"
             >
@@ -385,7 +304,7 @@ const onFontChange = () => {
             </a>
           </div>
 
-          <div class="form-row" v-if="aiProviderPresets[configStore.config.ai.provider]?.showApiUrl">
+          <div class="form-row" v-if="AI_PROVIDER_PRESETS[configStore.config.ai.provider]?.showApiUrl">
             <label class="form-label">API 地址</label>
             <el-input
               v-model="configStore.config.ai.apiUrl"

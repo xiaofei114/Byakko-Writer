@@ -6,6 +6,7 @@ import { ElMessage, ElNotification, ElMessageBox } from 'element-plus';
 import { useBookStore } from '../stores/book';
 import { useConfigStore } from '../stores/config';
 import type { DetectedConflict } from '../types';
+import { showSimpleError } from '../utils/errorHandler';
 
 const props = defineProps<{ modelValue: boolean }>();
 const emit = defineEmits<{ (e: 'update:modelValue', v: boolean): void; (e: 'fixConflict', conflict: DetectedConflict): void }>();
@@ -58,7 +59,7 @@ const runDetection = async () => {
     }
     ElMessage.success(activeCount === 0 ? '未检测到设定冲突' : `检测到 ${activeCount} 个新冲突`);
   } catch (e) {
-    ElMessage.error('检测失败: ' + e);
+    showSimpleError(e);
   } finally {
     isDetecting.value = false;
   }
@@ -70,7 +71,7 @@ const ignoreConflict = async (id: string) => {
     await loadConflicts();
     ElMessage.success('已忽略');
   } catch (e) {
-    ElMessage.error('操作失败: ' + e);
+    showSimpleError(e);
   }
 };
 
@@ -80,7 +81,7 @@ const unignoreConflict = async (id: string) => {
     await loadConflicts();
     ElMessage.success('已取消忽略');
   } catch (e) {
-    ElMessage.error('操作失败: ' + e);
+    showSimpleError(e);
   }
 };
 
@@ -96,7 +97,7 @@ const deleteConflict = async (id: string) => {
     ElMessage.success('已删除');
   } catch (e: any) {
     if (e !== 'cancel') {
-      ElMessage.error('删除失败: ' + e);
+      showSimpleError(e);
     }
   }
 };

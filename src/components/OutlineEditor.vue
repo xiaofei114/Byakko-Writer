@@ -3,6 +3,7 @@ import { ref, computed, watch, onMounted, onUnmounted, onActivated } from 'vue';
 import { useBookStore } from '../stores/book';
 import { ElMessage } from 'element-plus';
 import type { Outline } from '../types';
+import { showSimpleError } from '../utils/errorHandler';
 import {
   Document,
   Collection,
@@ -103,7 +104,7 @@ const loadAllOutlines = async () => {
     }
   } catch (error) {
     console.error('加载大纲失败:', error);
-    ElMessage.error('加载大纲失败');
+    showSimpleError(error);
   } finally {
     loading.value = false;
   }
@@ -148,7 +149,7 @@ const saveOutline = async () => {
     await loadAllOutlines();
   } catch (error) {
     console.error('保存大纲失败:', error);
-    ElMessage.error('保存大纲失败');
+    showSimpleError(error);
   } finally {
     saving.value = false;
   }

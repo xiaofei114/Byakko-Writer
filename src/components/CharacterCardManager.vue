@@ -3,6 +3,7 @@ import { ref, computed, onMounted, watch } from 'vue';
 import { useBookStore } from '../stores/book';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import type { CharacterCard, CharacterRelationship } from '../types';
+import { showSimpleError } from '../utils/errorHandler';
 import {
   Plus,
   Search,
@@ -70,7 +71,7 @@ const loadCharacterCards = async () => {
     characterCards.value = cards;
   } catch (error) {
     console.error('加载角色卡失败:', error);
-    ElMessage.error('加载角色卡失败');
+    showSimpleError(error);
   } finally {
     loading.value = false;
   }
@@ -87,7 +88,7 @@ watch(() => props.modelValue, (visible) => {
 const openCreateDialog = () => {
   isEditing.value = false;
   currentCard.value = {
-    book_id: bookStore.currentBook?.id || '',
+    bookId: bookStore.currentBook?.id || '',
     name: '',
     gender: '',
     age: '',
@@ -145,7 +146,7 @@ const saveCharacterCard = async () => {
     await loadCharacterCards();
   } catch (error) {
     console.error('保存角色卡失败:', error);
-    ElMessage.error('保存角色卡失败');
+    showSimpleError(error);
   }
 };
 
@@ -163,7 +164,7 @@ const deleteCharacterCard = async (card: CharacterCard) => {
   } catch (error) {
     if (error !== 'cancel') {
       console.error('删除角色卡失败:', error);
-      ElMessage.error('删除角色卡失败');
+      showSimpleError(error);
     }
   }
 };
@@ -171,11 +172,11 @@ const deleteCharacterCard = async (card: CharacterCard) => {
 // 添加关系
 const addRelationship = () => {
   currentRelationships.value.push({
-    target_character_id: '',
-    target_name: '',
+    targetCharacterId: '',
+    targetName: '',
     relationship: '',
     description: ''
-  } as CharacterRelationship);
+  });
 };
 
 // 删除关系
@@ -386,7 +387,7 @@ onMounted(() => {
       <el-form-item label="人物关系">
         <div class="relationship-list">
           <div v-for="(rel, index) in currentRelationships" :key="index" class="relationship-item">
-            <el-input v-model="rel.target_name" placeholder="相关人物" size="small" style="width: 120px" />
+            <el-input v-model="rel.targetName" placeholder="相关人物" size="small" style="width: 120px" />
             <el-input v-model="rel.relationship" placeholder="关系" size="small" style="width: 100px" />
             <el-input v-model="rel.description" placeholder="描述" size="small" style="flex: 1" />
             <el-button text type="danger" :icon="Close" size="small" @click="removeRelationship(index)" />
@@ -487,7 +488,7 @@ onMounted(() => {
         <div class="section-label">人物关系</div>
         <div class="section-content">
           <div v-for="(rel, index) in viewingCard.relationships" :key="index" class="relationship-row">
-            <span class="rel-target">{{ rel.target_name }}</span>
+            <span class="rel-target">{{ rel.targetName }}</span>
             <span class="rel-type">{{ rel.relationship }}</span>
             <span v-if="rel.description" class="rel-desc">{{ rel.description }}</span>
           </div>

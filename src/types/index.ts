@@ -137,6 +137,29 @@ export interface ChatSession {
   messageCount: number;
 }
 
+// ==================== AI 事件类型 ====================
+
+export interface StreamEvent {
+  sessionId: string;
+  chunk: string;
+  isComplete: boolean;
+  isToolCall: boolean;
+  toolName?: string;
+  toolDisplayName?: string;
+  toolParams?: Record<string, any>;
+  sessionStarted?: boolean;
+  isError?: boolean;
+  errorMessage?: string;
+}
+
+export interface AgentPhaseEvent {
+  type: 'phase_start' | 'phase_complete' | 'tool_call' | 'tool_result';
+  sessionId: string;
+  phase?: 'intent' | 'tool' | 'writing' | 'outlining' | 'polishing';
+  message?: string;
+  result?: string;
+}
+
 // ==================== 章节快照类型 ====================
 
 export interface ChapterSnapshot {
@@ -162,33 +185,6 @@ export interface SnapshotComparison {
   old_snapshot: ChapterSnapshot;
   new_snapshot: ChapterSnapshot;
   diff_blocks: DiffBlock[];
-}
-
-// ==================== 角色卡类型 ====================
-
-export interface CharacterRelationship {
-  target_character_id: string;
-  target_name: string;
-  relationship: string;
-  description: string;
-}
-
-export interface CharacterCard {
-  id: string;
-  book_id: string;
-  name: string;
-  aliases: string[];
-  gender: string;
-  age: string;
-  appearance: string;
-  personality: string;
-  background: string;
-  goals: string;
-  relationships: CharacterRelationship[];
-  tags: string[];
-  notes: string;
-  created_at: number;
-  updated_at: number;
 }
 
 // ==================== 大纲类型 ====================

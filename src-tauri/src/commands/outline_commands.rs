@@ -1,4 +1,4 @@
-use crate::models::{Outline, OutlineStats};
+use crate::models::Outline;
 use crate::services::outline_service;
 
 /// 创建或更新大纲
@@ -62,16 +62,4 @@ pub async fn list_chapter_outlines(
 #[tauri::command]
 pub async fn delete_outline(outline_id: String) -> Result<(), String> {
     outline_service::delete_outline(outline_id).await.map_err(|e| e.to_string())
-}
-
-/// 获取大纲统计信息
-#[tauri::command]
-pub async fn get_outline_stats(
-    book_id: String,
-    volume_id: Option<String>,
-    chapter_id: Option<String>,
-) -> Result<OutlineStats, String> {
-    outline_service::get_outline_stats(book_id, volume_id, chapter_id)
-        .await
-        .map_err(|e| e.to_string())
 }

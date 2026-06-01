@@ -2,6 +2,7 @@
 import { ref, onMounted, watch } from 'vue';
 import { useBookStore } from '../stores/book';
 import { ElMessage, ElMessageBox } from 'element-plus';
+import { showSimpleError } from '../utils/errorHandler';
 import {
   Collection,
   RefreshLeft,
@@ -116,7 +117,7 @@ const handleCreate = async () => {
     }
   } catch (error) {
     console.error('创建快照失败:', error);
-    ElMessage.error('创建快照失败');
+    showSimpleError(error);
   } finally {
     creating.value = false;
   }
@@ -146,7 +147,7 @@ const handleRestore = async (snapshot: any) => {
   } catch (error) {
     if (error !== 'cancel') {
       console.error('恢复快照失败:', error);
-      ElMessage.error('恢复快照失败');
+      showSimpleError(error);
     }
   }
 };
@@ -176,7 +177,7 @@ const handleDelete = async (snapshot: any) => {
   } catch (error) {
     if (error !== 'cancel') {
       console.error('删除快照失败:', error);
-      ElMessage.error('删除快照失败');
+      showSimpleError(error);
     }
   }
 };
@@ -241,7 +242,7 @@ const handleCompare = async () => {
     compareResult.value = result;
   } catch (error) {
     console.error('对比快照失败:', error);
-    ElMessage.error('对比快照失败');
+    showSimpleError(error);
   } finally {
     compareLoading.value = false;
   }

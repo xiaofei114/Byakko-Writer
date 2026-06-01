@@ -5,6 +5,7 @@ import { useConfigStore } from '../stores/config';
 import { invoke } from '@tauri-apps/api/core';
 import { Setting, Plus, Delete, Collection, Document, EditPen } from '@element-plus/icons-vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
+import { showSimpleError } from '../utils/errorHandler';
 
 const bookStore = useBookStore();
 const configStore = useConfigStore();
@@ -87,7 +88,7 @@ const confirmEditBook = async () => {
     ElMessage.success('书籍信息已更新');
     await bookStore.updateBooksList();
   } catch (error) {
-    ElMessage.error('更新失败：' + error);
+    showSimpleError(error);
   }
 };
 

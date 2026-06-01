@@ -2,6 +2,7 @@ import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import type { AppConfig, AIConfig } from '../types';
+import { DEFAULT_CONFIG } from '../config/appConfig';
 
 // 后端配置格式
 interface BackendConfig {
@@ -24,29 +25,9 @@ interface BackendConfig {
   };
 }
 
-const defaultConfig: AppConfig = {
-  theme: 'light',
-  primaryColor: '#3498db',
-  fontFamily: 'system',
-  fontSize: 16,
-  lineHeight: 1.8,
-  autoSave: true,
-  autoSaveInterval: 30,
-  autoStoryMemory: true,
-  ai: {
-    provider: 'deepseek',
-    apiKey: '',
-    apiUrl: 'https://api.deepseek.com/v1',
-    model: 'deepseek-chat',
-    temperature: 0.7,
-    maxTokens: 2000,
-    maxRounds: 30
-  }
-};
-
 export const useConfigStore = defineStore('config', () => {
   // State
-  const config = ref<AppConfig>({ ...defaultConfig });
+  const config = ref<AppConfig>({ ...DEFAULT_CONFIG });
   const isSettingsOpen = ref(false);
   const isLoading = ref(false);
 
@@ -113,7 +94,7 @@ export const useConfigStore = defineStore('config', () => {
     } catch (error) {
       console.error('加载配置失败:', error);
       // 使用默认配置
-      config.value = { ...defaultConfig };
+      config.value = { ...DEFAULT_CONFIG };
     } finally {
       isLoading.value = false;
     }

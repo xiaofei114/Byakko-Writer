@@ -150,30 +150,3 @@ pub async fn update_chapter_title(
 ) -> Result<(), String> {
     book_service::update_chapter_title(chapter_id, title).await.map_err(|e| e.to_string())
 }
-
-/// 应用单行修改（AI提议的修改）
-#[tauri::command]
-pub async fn apply_line_edit(
-    chapter_id: String,
-    line_number: i64,
-    new_text: String,
-) -> Result<(), String> {
-    // 加载当前章节内容
-    let content = book_service::load_chapter_content(chapter_id.clone()).await.map_err(|e| e.to_string())?;
-    let lines: Vec<&str> = content.lines().collect();
-    let total_lines = lines.len() as i64;
-
-    if line_number < 1 || line_number > total_lines {
-        return Err(format!("行号 {} 超出范围（1-{}）", line_number, total_lines));
-    }
-
-    // 构建新内容
-    let mut new_lines: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
-    new_lines[(line_number - 1) as usize] = new_text;
-
-    // 保存修改后的内容
-    let new_content = new_lines.join("\n");
-    book_service::save_chapter_content(chapter_id, new_content).await.map_err(|e| e.to_string())?;
-
-    Ok(())
-}

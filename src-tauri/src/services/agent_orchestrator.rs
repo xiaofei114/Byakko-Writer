@@ -7,6 +7,15 @@ use tauri::{AppHandle, Emitter};
 use std::sync::Mutex;
 use std::collections::HashMap;
 
+/// 错误追踪信息
+#[derive(Debug, Clone)]
+struct ErrorTracker {
+    /// 错误原因（用于判断是否是同一种错误）
+    reason: String,
+    /// 连续出现次数
+    count: u32,
+}
+
 /// 会话状态
 #[derive(Debug, Clone)]
 struct SessionState {
@@ -14,6 +23,7 @@ struct SessionState {
     round_count: u32,
     compressed_context: String,
     waiting_for_user: bool, // 是否正在等待用户答复（ask_user工具）
+    last_error: Option<ErrorTracker>, // 最近一次工具执行错误
 }
 
 /// 全局会话状态管理
@@ -375,6 +385,7 @@ impl AgentOrchestrator {
             round_count: 0,
             compressed_context: String::new(),
             waiting_for_user: false,
+            last_error: None,
         });
 
         // 如果正在等待用户答复，检查是否是恢复对话
@@ -557,7 +568,28 @@ impl AgentOrchestrator {
                         }));
 
                         // 提取上下文（工具返回的章节内容、角色信息等）
-                        let context = Self::extract_writer_context(&state.messages);
+                        let mut context = Self::extract_writer_context(&state.messages);
+
+                        // 自动获取当前章大纲（如果有）
+                        if !ch_id.is_empty() {
+                            if let Ok(coarse) = crate::services::outline_service::get_outline_by_level(
+                                book_id.to_string(), None, Some(ch_id.to_string()), "coarse".to_string()
+                            ).await {
+                                if let Some(outline) = coarse {
+                                    context = format!("## 当前章粗纲\n{}\n\n{}", outline.content, context);
+                                    log::info!("[Agent] 已注入当前章粗纲");
+                                }
+                            }
+                            if let Ok(fine) = crate::services::outline_service::get_outline_by_level(
+                                book_id.to_string(), None, Some(ch_id.to_string()), "fine".to_string()
+                            ).await {
+                                if let Some(outline) = fine {
+                                    context = format!("## 当前章细纲\n{}\n\n{}", outline.content, context);
+                                    log::info!("[Agent] 已注入当前章细纲");
+                                }
+                            }
+                        }
+
                         log::info!("[Agent] 写作上下文长度: {} 字", context.len());
 
                         // 调用写作AI生成内容
@@ -575,7 +607,8 @@ impl AgentOrchestrator {
                         // 流式调用写作AI
                         match Self::stream_writer_ai(app, session_id, writer_messages, config.clone()).await {
                             Ok(content) => {
-                                log::info!("[Agent] 写作AI完成，内容长度: {} 字", content.len());
+                                let char_count = content.chars().count();
+                                log::info!("[Agent] 写作AI完成，内容长度: {} 字", char_count);
                                 let _ = app.emit("ai-write-result", serde_json::json!({
                                     "sessionId": session_id,
                                     "bookId": book_id,
@@ -583,7 +616,14 @@ impl AgentOrchestrator {
                                     "content": content,
                                     "description": w_desc,
                                 }));
-                                format!("创作完成（{}字），内容已展示给用户", content.chars().count())
+                                // 返回写作结果摘要给决策AI，让它知道写了什么
+                                let summary = if char_count > 200 {
+                                    let preview: String = content.chars().take(200).collect();
+                                    format!("创作完成（{}字），内容已展示给用户。开头：{}...", char_count, preview)
+                                } else {
+                                    format!("创作完成（{}字），内容已展示给用户。全文：{}", char_count, content)
+                                };
+                                summary
                             }
                             Err(e) => {
                                 log::error!("[Agent] 写作AI失败: {}", e);
@@ -671,10 +711,48 @@ impl AgentOrchestrator {
                         }));
                         format!("询问用户：{}", question)
                     } else {
-                        execute_tool_call(&ToolCall {
+                        match execute_tool_call(&ToolCall {
                             name: tool_name.clone(),
                             arguments: args.clone(),
-                        }, book_id).await?
+                        }, book_id).await {
+                            Ok(result) => {
+                                // 工具执行成功，清除错误计数
+                                state.last_error = None;
+                                result
+                            }
+                            Err(e) => {
+                                let error_msg = e.to_string();
+                                log::warn!("[Agent] 工具 {} 执行失败: {}", tool_name, error_msg);
+
+                                // 检查是否是同一种错误
+                                let is_same_error = state.last_error.as_ref()
+                                    .map(|tracker| tracker.reason == error_msg)
+                                    .unwrap_or(false);
+
+                                if is_same_error {
+                                    // 同一种错误，计数+1
+                                    if let Some(ref mut tracker) = state.last_error {
+                                        tracker.count += 1;
+                                    }
+
+                                    // 超过3次，停止并返回错误
+                                    if state.last_error.as_ref().map(|t| t.count).unwrap_or(0) >= 3 {
+                                        log::error!("[Agent] 同一种错误连续出现3次，停止重试: {}", error_msg);
+                                        return Err(anyhow::anyhow!("工具 {} 连续3次失败: {}", tool_name, error_msg));
+                                    }
+
+                                    format!("工具执行失败（第{}次）: {}。请尝试其他方式完成任务。", 
+                                        state.last_error.as_ref().map(|t| t.count).unwrap_or(1), error_msg)
+                                } else {
+                                    // 不同的错误，重置计数
+                                    state.last_error = Some(ErrorTracker {
+                                        reason: error_msg.clone(),
+                                        count: 1,
+                                    });
+                                    format!("工具执行失败: {}。请尝试其他方式完成任务。", error_msg)
+                                }
+                            }
+                        }
                     };
 
                     tool_results.push(format!("工具 {} 返回: {}", tool_name, result));
@@ -922,6 +1000,8 @@ impl AgentOrchestrator {
                                         tool_name: None,
                                         tool_display_name: None,
                                         tool_params: None,
+                                        is_error: false,
+                                        error_message: None,
                                     };
                                     let _ = app.emit("ai-chat-stream", event);
                                 }
@@ -931,6 +1011,19 @@ impl AgentOrchestrator {
                 }
                 Err(e) => {
                     log::error!("[Agent] 流读取错误: {}", e);
+                    let error_msg = format!("AI 流式响应失败：{}", e);
+                    let error_event = StreamEvent {
+                        session_id: session_id.to_string(),
+                        chunk: String::new(),
+                        is_complete: true,
+                        is_tool_call: false,
+                        tool_name: None,
+                        tool_display_name: None,
+                        tool_params: None,
+                        is_error: true,
+                        error_message: Some(error_msg),
+                    };
+                    let _ = app.emit("ai-chat-stream", error_event);
                     break;
                 }
             }
@@ -944,6 +1037,8 @@ impl AgentOrchestrator {
             tool_name: None,
             tool_display_name: None,
             tool_params: None,
+            is_error: false,
+            error_message: None,
         };
         let _ = app.emit("ai-chat-stream", complete_event);
 
@@ -983,6 +1078,8 @@ impl AgentOrchestrator {
     /// 从消息历史中提取写作上下文
     fn extract_writer_context(messages: &[ChatMessage]) -> String {
         let mut ctx = String::new();
+        let mut tool_results: Vec<String> = Vec::new();
+
         for msg in messages {
             match msg.role.as_str() {
                 "user" => {
@@ -993,20 +1090,38 @@ impl AgentOrchestrator {
                         }
                     }
                 }
+                "assistant" => {
+                    // 提取决策AI的分析和创作指导
+                    if let Some(content) = &msg.content {
+                        // 跳过纯工具调用消息（有tool_calls的assistant消息）
+                        if msg.tool_calls.is_none() && !content.is_empty() {
+                            ctx.push_str(&format!("## 创作指导\n{}\n\n", content));
+                        }
+                    }
+                }
                 "tool" => {
                     if let Some(content) = &msg.content {
-                        // 截断过长的工具返回
-                        if content.len() > 2000 {
-                            let safe_len = content.char_indices().nth(2000).map(|(i, _)| i).unwrap_or(content.len());
-                            ctx.push_str(&format!("## 查询结果\n{}...（已截断）\n\n", &content[..safe_len]));
+                        // 工具返回内容截断到5000字符（之前是2000，太短会丢失设定）
+                        if content.len() > 5000 {
+                            let safe_len = content.char_indices().nth(5000).map(|(i, _)| i).unwrap_or(content.len());
+                            tool_results.push(format!("{}...（已截断）", &content[..safe_len]));
                         } else {
-                            ctx.push_str(&format!("## 查询结果\n{}\n\n", content));
+                            tool_results.push(content.clone());
                         }
                     }
                 }
                 _ => {}
             }
         }
+
+        // 工具结果放在最后，作为参考资料
+        if !tool_results.is_empty() {
+            ctx.push_str("## 查询到的参考资料\n");
+            for (i, result) in tool_results.iter().enumerate() {
+                ctx.push_str(&format!("### 资料{}\n{}\n\n", i + 1, result));
+            }
+        }
+
         if ctx.is_empty() {
             ctx.push_str("无额外上下文");
         }
@@ -1063,6 +1178,8 @@ impl AgentOrchestrator {
             tool_name: None,
             tool_display_name: None,
             tool_params: None,
+            is_error: false,
+            error_message: None,
         };
         let _ = app.emit("ai-chat-stream", event);
 
@@ -1074,6 +1191,8 @@ impl AgentOrchestrator {
             tool_name: None,
             tool_display_name: None,
             tool_params: None,
+            is_error: false,
+            error_message: None,
         };
         let _ = app.emit("ai-chat-stream", complete_event);
     }
@@ -1113,6 +1232,8 @@ impl AgentOrchestrator {
             tool_name: Some(tool_name.to_string()),
             tool_display_name: Some(display_name.to_string()),
             tool_params,
+            is_error: false,
+            error_message: None,
         };
         let _ = app.emit("ai-chat-stream", event);
     }

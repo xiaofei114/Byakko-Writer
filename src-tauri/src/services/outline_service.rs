@@ -1,5 +1,5 @@
 use crate::db::get_pool;
-use crate::models::{Outline, OutlineStats};
+use crate::models::Outline;
 
 /// 创建或更新大纲
 pub async fn save_outline(
@@ -199,49 +199,4 @@ pub async fn delete_outline(outline_id: String) -> anyhow::Result<()> {
         .await?;
     
     Ok(())
-}
-
-/// 获取大纲统计信息
-pub async fn get_outline_stats(
-    book_id: String,
-    volume_id: Option<String>,
-    chapter_id: Option<String>,
-) -> anyhow::Result<OutlineStats> {
-    let pool = get_pool().await?;
-    
-    // 查询粗纲
-    let coarse: Option<(i64,)> = sqlx::query_as(
-        r#"
-        SELECT updated_at FROM outlines
-        WHERE book_id = ?1 AND volume_id IS ?2 AND chapter_id IS ?3 AND outline_type = 'coarse'
-        "#
-    )
-    .bind(&book_id)
-    .bind(&volume_id)
-    .bind(&chapter_id)
-    .fetch_optional(pool)
-    .await?;
-    
-    // 查询细纲
-    let fine: Option<(i64,)> = sqlx::query_as(
-        r#"
-        SELECT updated_at FROM outlines
-        WHERE book_id = ?1 AND volume_id IS ?2 AND chapter_id IS ?3 AND outline_type = 'fine'
-        "#
-    )
-    .bind(&book_id)
-    .bind(&volume_id)
-    .bind(&chapter_id)
-    .fetch_optional(pool)
-    .await?;
-    
-    Ok(OutlineStats {
-        book_id,
-        volume_id,
-        chapter_id,
-        has_coarse_outline: coarse.is_some(),
-        has_fine_outline: fine.is_some(),
-        coarse_outline_updated_at: coarse.map(|(t,)| t),
-        fine_outline_updated_at: fine.map(|(t,)| t),
-    })
 }

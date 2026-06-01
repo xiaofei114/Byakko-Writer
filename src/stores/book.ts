@@ -193,8 +193,12 @@ export const useBookStore = defineStore('book', () => {
       // 加载书籍元数据（包含所有章节内容）
       const meta = await invoke<BookMeta>('load_book', { bookId });
       const book = convertBookMeta(meta);
+      // 保留用户当前正在浏览的章节，不被后端存储的 currentChapterId 覆盖
+      const preservedChapterId = currentChapterId.value;
       currentBook.value = book;
-      currentChapterId.value = book.currentChapterId;
+      if (!preservedChapterId || !book.chapters.some(ch => ch.id === preservedChapterId)) {
+        currentChapterId.value = book.currentChapterId;
+      }
       chapterContents.value.clear();
       lastSavedAt.value = 0; // 重置保存时间
       

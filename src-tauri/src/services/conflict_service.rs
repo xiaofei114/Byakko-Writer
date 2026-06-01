@@ -1,6 +1,6 @@
 use crate::db::get_pool;
 use crate::models::{
-    AIConfig, ChatMessage, ConflictDetectionStatus, DetectedConflict, FunctionDef, ToolDef,
+    AIConfig, ChatMessage, DetectedConflict, FunctionDef, ToolDef,
 };
 use uuid::Uuid;
 
@@ -13,21 +13,6 @@ fn is_invalid_conflict_report(description: &str) -> bool {
         || lower.contains("没有问题")
         || lower.contains("无需修改")
         || lower.contains("设定一致")
-}
-
-pub async fn get_conflict_detection_status(
-    book_id: &str,
-) -> anyhow::Result<Option<ConflictDetectionStatus>> {
-    let pool = get_pool().await?;
-    let status = sqlx::query_as::<_, ConflictDetectionStatus>(
-        "SELECT book_id, last_status, last_error_kind, last_error_message, last_error_at, last_auto_checked_at
-         FROM conflict_check_progress WHERE book_id = ?1",
-    )
-    .bind(book_id)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(status)
 }
 
 pub async fn mark_detection_running(book_id: &str) -> anyhow::Result<()> {

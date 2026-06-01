@@ -15,17 +15,6 @@ pub struct DetectedConflict {
     pub ignored_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-#[serde(rename_all = "camelCase")]
-pub struct ConflictDetectionStatus {
-    pub book_id: String,
-    pub last_status: String,
-    pub last_error_kind: Option<String>,
-    pub last_error_message: Option<String>,
-    pub last_error_at: i64,
-    pub last_auto_checked_at: i64,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConflictDetectionStatusEvent {

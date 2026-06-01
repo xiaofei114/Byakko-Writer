@@ -7,6 +7,7 @@ import type { ChapterSummary } from '../types';
 import { Check, Warning, Loading, Collection, Folder, Document, View, MagicStick } from '@element-plus/icons-vue';
 import { ElMessage } from 'element-plus';
 import { requestPolish } from '../utils/eventBus';
+import { showSimpleError } from '../utils/errorHandler';
 
 const bookStore = useBookStore();
 const configStore = useConfigStore();
@@ -204,7 +205,7 @@ const performSave = async () => {
   } catch (error) {
     console.error('保存失败:', error);
     saveStatus.value = 'unsaved';
-    ElMessage.error('保存失败: ' + (error as Error).message);
+    showSimpleError(error);
   }
 };
 
@@ -310,7 +311,7 @@ const handleGenerateSummary = async () => {
     ElMessage.success('摘要生成成功');
   } catch (error) {
     console.error('生成摘要失败:', error);
-    ElMessage.error('生成摘要失败: ' + (error as Error).message);
+    showSimpleError(error);
   } finally {
     isGeneratingSummary.value = false;
   }
