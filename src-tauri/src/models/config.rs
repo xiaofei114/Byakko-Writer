@@ -25,7 +25,7 @@ pub struct AppConfig {
 }
 
 fn default_theme() -> String { "light".to_string() }
-fn default_primary_color() -> String { "#3498db".to_string() }
+fn default_primary_color() -> String { "#2c3e50".to_string() }
 fn default_font_family() -> String { "system".to_string() }
 fn default_font_size() -> i32 { 16 }
 fn default_line_height() -> f32 { 1.8 }
@@ -37,7 +37,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             theme: "light".to_string(),
-            primary_color: "#3498db".to_string(),
+            primary_color: "#2c3e50".to_string(),
             font_family: "system".to_string(),
             font_size: 16,
             line_height: 1.8,
