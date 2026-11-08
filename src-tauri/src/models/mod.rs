@@ -8,6 +8,7 @@ pub mod config;
 pub mod writing_style;
 pub mod conflict;
 pub mod story_memory;
+pub mod canon;
 
 pub use book::*;
 pub use ai::*;
@@ -19,3 +20,4 @@ pub use config::*;
 pub use writing_style::*;
 pub use conflict::*;
 pub use story_memory::*;
+pub use canon::*;

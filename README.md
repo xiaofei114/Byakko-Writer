@@ -107,7 +107,7 @@ pnpm tauri build
 ┌─────────────────────────────────────────┐
 │              前端 (Frontend)              │
 │  ┌─────────┐ ┌─────────┐ ┌────────────┐ │
-│  │  Vue 3  │ │Element+ │ │   Quill    │ │
+│  │  Vue 3  │ │Element+ │ │  marked    │ │
 │  └─────────┘ └─────────┘ └────────────┘ │
 │  ┌─────────┐ ┌─────────┐ ┌────────────┐ │
 │  │  Pinia  │ │ Tauri API│ │   Vite     │ │
@@ -135,19 +135,22 @@ byakko-writer/
 │   │   ├── Sidebar.vue       # 侧边栏（卷/章节树）
 │   │   ├── WritingArea.vue   # 写作区域
 │   │   ├── AIChat.vue        # AI 对话面板
+│   │   ├── SnapshotManager.vue # 版本快照与对比
 │   │   └── ...
 │   ├── stores/               # Pinia 状态管理
 │   ├── views/                # 页面视图
-│   └── api/                  # API 封装
+│   ├── api/                  # 前端 API 封装
+│   └── utils/                # 错误处理、Markdown 渲染与 HTML 清洗
 ├── src-tauri/                # Tauri 后端
 │   ├── src/
 │   │   ├── main.rs           # 应用入口
+│   │   ├── commands/         # Tauri 命令层
 │   │   ├── services/         # 业务服务
 │   │   ├── models/           # 数据模型
 │   │   └── db.rs             # 数据库管理
-│   ├── prompts/              # AI 提示词
+│   ├── prompts/              # AI 提示词（编译期嵌入）
 │   └── icons/                # 应用图标
-├── docs/                     # 文档
+├── 需求文档/                 # PRD 与初始需求
 └── package.json
 ```
 
@@ -162,9 +165,9 @@ byakko-writer/
 | Linux | `~/.local/share/byakko-writer/` |
 
 包含文件：
-- `data.db` - SQLite 数据库（书籍、章节、大纲等）
-- `config.json` - 应用配置
-- `books/` - 书籍快照数据
+- `data.db` - SQLite 数据库（书籍、卷、章节、摘要、对话、角色卡、大纲、故事记忆等）
+- `config.json` - 应用配置（API Key 在 Windows 下使用系统 DPAPI 加密存储）
+- `books/<book_id>/chapter_snapshots.db` - 每本书独立的章节快照库
 
 ## 路线图
 
@@ -174,6 +177,10 @@ byakko-writer/
 - [x] 角色卡管理
 - [x] 版本快照与对比
 - [x] 深色/浅色主题
+- [x] AI 工具调用（章节检索/写作/行编辑/大纲）
+- [x] 故事记忆（Story Bible）自动更新
+- [x] 设定冲突检测
+- [x] 写作风格学习
 - [ ] 导出功能（Word/PDF/Markdown）
 - [ ] 拼写检查
 - [ ] 写作数据统计
@@ -199,7 +206,7 @@ byakko-writer/
 - [Tauri](https://tauri.app/) - 跨平台桌面应用框架
 - [Vue.js](https://vuejs.org/) - 前端框架
 - [Element Plus](https://element-plus.org/) - UI 组件库
-- [Quill](https://quilljs.com/) - 富文本编辑器
+- [marked](https://marked.js.org/) - Markdown 渲染
 
 ---
 

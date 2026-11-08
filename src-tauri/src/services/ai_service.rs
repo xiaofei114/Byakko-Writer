@@ -6,9 +6,9 @@ use std::time::Duration;
 /// 最大重试次数（网络错误/超时时重试）
 const MAX_RETRIES: u32 = 2;
 /// 普通请求超时（秒）
-const REQUEST_TIMEOUT_SECS: u64 = 60;
-/// 流式请求超时（秒，写作等长输出需要更久）
-const STREAM_TIMEOUT_SECS: u64 = 180;
+const REQUEST_TIMEOUT_SECS: u64 = 90;
+/// 流式请求超时（秒，写一整章可能输出几千字，需要更久）
+const STREAM_TIMEOUT_SECS: u64 = 300;
 
 /// 构建带超时配置的 HTTP 客户端
 fn build_client(timeout_secs: u64) -> Client {
@@ -210,6 +210,7 @@ pub async fn send_ai_message(
             Ok(AiDecision {
                 content: choice.message.content.filter(|s| !s.is_empty()),
                 tool_calls: choice.message.tool_calls.filter(|t| !t.is_empty()),
+                reasoning: choice.message.reasoning_content.filter(|s| !s.trim().is_empty()),
             })
         }
     }).await
@@ -322,4 +323,149 @@ pub async fn call_ai_for_style_analysis(
                 .ok_or_else(|| anyhow::anyhow!("AI 未返回内容"))
         }
     }).await
+}
+
+/// 流式增量（正文 / 推理内容分开）
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SseDelta {
+    pub content: String,
+    pub reasoning: String,
+}
+
+/// 从流式响应块中提取增量文本（正文 + 推理内容）
+///
+/// 网络分块可能把一行 `data: {...}` 从中间切断，如果按块独立解析会丢字、丢句。
+/// 这里把数据追加到调用方持有的缓冲区，按 SSE 事件（空行分隔）逐个解析。
+///
+/// 调用方在流结束时再喂一个 `b"\n\n"`，即可冲刷最后一个没有空行结尾的事件。
+pub fn extract_sse_deltas_full(buffer: &mut String, chunk: &[u8]) -> Vec<SseDelta> {
+    buffer.push_str(&String::from_utf8_lossy(chunk));
+
+    let mut deltas = Vec::new();
+
+    loop {
+        let separator = match buffer.find("\n\n") {
+            Some(pos) => Some((pos, 2usize)),
+            None => buffer.find("\r\n\r\n").map(|pos| (pos, 4usize)),
+        };
+
+        let Some((pos, sep_len)) = separator else {
+            break;
+        };
+
+        let event: String = buffer[..pos].to_string();
+        // pos 一定位于换行符边界，drain 不会切断 UTF-8 字符
+        buffer.drain(..pos + sep_len);
+
+        for line in event.lines() {
+            let line = line.trim_end_matches('\r');
+            let Some(data) = line.strip_prefix("data:") else {
+                continue;
+            };
+            let data = data.trim_start();
+            if data.is_empty() || data == "[DONE]" {
+                continue;
+            }
+
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                let delta = &json["choices"][0]["delta"];
+
+                let content = delta["content"].as_str().unwrap_or("");
+                let reasoning = delta["reasoning_content"]
+                    .as_str()
+                    .or_else(|| delta["reasoning"].as_str())
+                    .unwrap_or("");
+
+                if !content.is_empty() || !reasoning.is_empty() {
+                    deltas.push(SseDelta {
+                        content: content.to_string(),
+                        reasoning: reasoning.to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    deltas
+}
+
+/// 只取正文增量（写作/润色用）
+pub fn extract_sse_deltas(buffer: &mut String, chunk: &[u8]) -> Vec<String> {
+    extract_sse_deltas_full(buffer, chunk)
+        .into_iter()
+        .filter_map(|delta| {
+            if delta.content.is_empty() {
+                None
+            } else {
+                Some(delta.content)
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_sse_deltas, extract_sse_deltas_full};
+
+    #[test]
+    fn parses_reasoning_delta() {
+        let mut buffer = String::new();
+        let deltas = extract_sse_deltas_full(
+            &mut buffer,
+            b"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think\"}}]}\n\n",
+        );
+
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].reasoning, "think");
+        assert!(deltas[0].content.is_empty());
+    }
+
+    #[test]
+    fn parses_single_event() {
+        let mut buffer = String::new();
+        let deltas = extract_sse_deltas(
+            &mut buffer,
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+        );
+        assert_eq!(deltas, vec!["hi".to_string()]);
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn handles_split_across_chunks() {
+        let mut buffer = String::new();
+        let first = extract_sse_deltas(
+            &mut buffer,
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"hel",
+        );
+        assert!(first.is_empty());
+
+        let second = extract_sse_deltas(
+            &mut buffer,
+            b"lo\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"!\"}}]}\n\n",
+        );
+        assert_eq!(second, vec!["hello".to_string(), "!".to_string()]);
+    }
+
+    #[test]
+    fn ignores_done_and_non_data_lines() {
+        let mut buffer = String::new();
+        let deltas = extract_sse_deltas(
+            &mut buffer,
+            b": keep-alive\n\ndata: [DONE]\n\ndata: {\"choices\":[{\"delta\":{}}]}\n\n",
+        );
+        assert!(deltas.is_empty());
+    }
+
+    #[test]
+    fn flushes_trailing_event_without_blank_line() {
+        let mut buffer = String::new();
+        let first = extract_sse_deltas(
+            &mut buffer,
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"tail\"}}]}",
+        );
+        assert!(first.is_empty());
+        let flushed = extract_sse_deltas(&mut buffer, b"\n\n");
+        assert_eq!(flushed, vec!["tail".to_string()]);
+    }
 }

@@ -17,7 +17,7 @@ use commands::{
     send_chat_message_stream, get_chat_history, get_chat_sessions, delete_chat_session, update_message_polish_handled, update_line_edit_handled_status, send_polish_request,
     // 快照相关命令
     create_chapter_snapshot, list_chapter_snapshots, get_chapter_snapshot,
-    delete_chapter_snapshot, cleanup_chapter_snapshots, compare_snapshots,
+    delete_chapter_snapshot, cleanup_chapter_snapshots, compare_snapshots, restore_chapter_snapshot,
     // 角色卡相关命令
     create_character_card, list_character_cards, get_character_card,
     update_character_card, delete_character_card, search_character_cards,
@@ -32,9 +32,14 @@ use commands::{
     trigger_style_analysis,
     // 冲突检测相关命令
     run_conflict_detection, ignore_conflict, unignore_conflict, delete_conflict,
-    get_all_conflicts,
+    get_all_conflicts, resolve_conflict,
     // 故事记忆相关命令
     get_story_memory, update_story_memory, get_story_memory_text, force_regenerate_story_memory,
+    // 批量编辑提案
+    apply_edit_proposal, apply_outline_proposal,
+    // 设定账本
+    list_canon_entities, get_canon_entity, update_canon_entity, delete_canon_entity,
+    delete_canon_state, delete_canon_event, canon_stats, get_canon_timeline, rebuild_canon,
 };
 
 fn main() {
@@ -43,9 +48,9 @@ fn main() {
         .init();
     log::info!("应用启动");
 
-    // 初始化数据库
+    // 初始化数据库（填充全局连接池单例，避免启动时建两次池）
     tauri::async_runtime::block_on(async {
-        if let Err(e) = db::init_db().await {
+        if let Err(e) = db::get_pool().await {
             log::error!("数据库初始化失败: {}", e);
         }
     });
@@ -105,6 +110,7 @@ fn main() {
             delete_chapter_snapshot,
             cleanup_chapter_snapshots,
             compare_snapshots,
+            restore_chapter_snapshot,
             // 角色卡
             create_character_card,
             list_character_cards,
@@ -133,12 +139,26 @@ fn main() {
             ignore_conflict,
             unignore_conflict,
             delete_conflict,
+            resolve_conflict,
             get_all_conflicts,
             // 故事记忆
             get_story_memory,
             update_story_memory,
             get_story_memory_text,
             force_regenerate_story_memory,
+            // 批量编辑提案
+            apply_edit_proposal,
+            apply_outline_proposal,
+            // 设定账本
+            list_canon_entities,
+            get_canon_entity,
+            update_canon_entity,
+            delete_canon_entity,
+            delete_canon_state,
+            delete_canon_event,
+            canon_stats,
+            get_canon_timeline,
+            rebuild_canon,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -50,8 +50,9 @@ impl Default for AppConfig {
                 api_url: "https://api.deepseek.com/v1".to_string(),
                 model: "deepseek-chat".to_string(),
                 temperature: 0.7,
-                max_tokens: 10000,
+                max_tokens: 4000,
                 max_rounds: 30,
+                enable_thinking: true,
             },
         }
     }

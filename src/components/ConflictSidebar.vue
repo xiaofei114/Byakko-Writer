@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { ref, watch, computed } from 'vue';
+import { ref, watch, computed, onMounted, onUnmounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { WarningFilled, Refresh, Delete, Check, Close, Tools, ArrowDown } from '@element-plus/icons-vue';
 import { ElMessage, ElNotification, ElMessageBox } from 'element-plus';
+import { listen } from '@tauri-apps/api/event';
+import type { UnlistenFn } from '@tauri-apps/api/event';
 import { useBookStore } from '../stores/book';
 import { useConfigStore } from '../stores/config';
 import type { DetectedConflict } from '../types';
@@ -16,11 +18,65 @@ const configStore = useConfigStore();
 const conflicts = ref<DetectedConflict[]>([]);
 const isDetecting = ref(false);
 const showIgnored = ref(false);
+const showResolved = ref(false);
 
-// 计算属性：未忽略的冲突
-const activeConflicts = computed(() => conflicts.value.filter(c => c.isIgnored !== 1));
+// 后台自动冲突检测的状态事件（`auto_style_service` 定时任务发出）
+interface AutoConflictStatusEvent {
+  bookId: string;
+  source: string;
+  status: 'started' | 'completed' | 'failed';
+  errorKind?: string;
+  userMessage?: string;
+  technicalMessage?: string;
+  conflictCount?: number;
+  occurredAt: number;
+}
+
+let autoStatusUnlisten: UnlistenFn | null = null;
+
+const handleAutoConflictStatus = async (event: AutoConflictStatusEvent) => {
+  if (!bookStore.currentBook || event.bookId !== bookStore.currentBook.id) return;
+
+  if (event.status === 'completed') {
+    await loadConflicts();
+    const count = event.conflictCount ?? 0;
+    if (count > 0) {
+      ElNotification({
+        title: '后台设定冲突检测完成',
+        message: `检测到 ${count} 条冲突，可在冲突面板查看`,
+        type: 'warning',
+        duration: 6000,
+      });
+    }
+  } else if (event.status === 'failed') {
+    ElNotification({
+      title: '后台设定冲突检测失败',
+      message: event.userMessage || event.technicalMessage || '请检查 AI 配置后重试',
+      type: 'error',
+      duration: 8000,
+    });
+  }
+};
+
+onMounted(async () => {
+  autoStatusUnlisten = await listen<AutoConflictStatusEvent>('auto-conflict-detection-status', (event) => {
+    handleAutoConflictStatus(event.payload);
+  });
+});
+
+onUnmounted(() => {
+  if (autoStatusUnlisten) {
+    autoStatusUnlisten();
+    autoStatusUnlisten = null;
+  }
+});
+
+// 计算属性：待处理冲突（未忽略、未解决）
+const activeConflicts = computed(() => conflicts.value.filter(c => c.isIgnored !== 1 && !c.resolvedAt));
 // 计算属性：已忽略的冲突
-const ignoredConflicts = computed(() => conflicts.value.filter(c => c.isIgnored === 1));
+const ignoredConflicts = computed(() => conflicts.value.filter(c => c.isIgnored === 1 && !c.resolvedAt));
+// 计算属性：已解决的冲突
+const resolvedConflicts = computed(() => conflicts.value.filter(c => !!c.resolvedAt));
 
 const loadConflicts = async () => {
   if (!bookStore.currentBook) return;
@@ -45,6 +101,7 @@ const runDetection = async () => {
         temperature: configStore.aiConfig.temperature,
         maxTokens: configStore.aiConfig.maxTokens,
         maxRounds: configStore.aiConfig.maxRounds,
+        enableThinking: configStore.aiConfig.enableThinking,
       }
     });
     await loadConflicts();
@@ -108,6 +165,16 @@ const fixConflict = (conflict: DetectedConflict) => {
   ElMessage.info('已将冲突发送到AI会话');
 };
 
+const resolveConflict = async (id: string) => {
+  try {
+    await invoke('resolve_conflict', { conflictId: id });
+    await loadConflicts();
+    ElMessage.success('已标记为已解决');
+  } catch (e) {
+    showSimpleError(e);
+  }
+};
+
 const severityTag = (s?: string) => {
   if (s === 'high') return 'danger';
   if (s === 'medium') return 'warning';
@@ -144,7 +211,7 @@ watch(() => props.modelValue, (v) => { if (v) loadConflicts(); });
     </template>
 
     <!-- 未忽略的冲突 -->
-    <div v-if="activeConflicts.length === 0 && ignoredConflicts.length === 0" class="empty-state">
+    <div v-if="activeConflicts.length === 0 && ignoredConflicts.length === 0 && resolvedConflicts.length === 0" class="empty-state">
       <p v-if="isDetecting">正在检测中...</p>
       <p v-else>暂无冲突，点击"开始检测"检查书籍设定一致性</p>
     </div>
@@ -157,11 +224,13 @@ watch(() => props.modelValue, (v) => { if (v) loadConflicts(); });
         <div class="conflict-header">
           <el-tag :type="severityTag(c.severity)" size="small">{{ severityLabel(c.severity) }}</el-tag>
           <el-tag v-if="c.isIgnored === 1" type="info" size="small">已忽略</el-tag>
+          <el-tag v-if="c.needsReview" type="warning" size="small">可能已修复，待复核</el-tag>
         </div>
         <div class="conflict-desc">{{ c.description }}</div>
         <div v-if="c.suggestion" class="conflict-sug">建议：{{ c.suggestion }}</div>
         <div class="conflict-actions">
           <el-button size="small" type="primary" :icon="Tools" @click="fixConflict(c)">修复</el-button>
+          <el-button size="small" type="success" plain :icon="Check" @click="resolveConflict(c.id)">已解决</el-button>
           <el-button size="small" type="warning" :icon="Check" @click="ignoreConflict(c.id)">忽略</el-button>
           <el-button size="small" type="danger" :icon="Delete" @click="deleteConflict(c.id)">删除</el-button>
         </div>
@@ -185,6 +254,25 @@ watch(() => props.modelValue, (v) => { if (v) loadConflicts(); });
           <div class="conflict-actions">
             <el-button size="small" type="primary" :icon="Tools" @click="fixConflict(c)">修复</el-button>
             <el-button size="small" :icon="Close" @click="unignoreConflict(c.id)">取消忽略</el-button>
+            <el-button size="small" type="danger" :icon="Delete" @click="deleteConflict(c.id)">删除</el-button>
+          </div>
+        </div>
+      </div>
+    </template>
+    <!-- 已解决的冲突 -->
+    <template v-if="resolvedConflicts.length > 0">
+      <div class="section-title ignored-title" @click="showResolved = !showResolved">
+        <span>已解决的冲突 ({{ resolvedConflicts.length }})</span>
+        <el-icon class="toggle-icon" :class="{ 'is-open': showResolved }"><arrow-down /></el-icon>
+      </div>
+      <div v-show="showResolved" class="ignored-section">
+        <div v-for="c in resolvedConflicts" :key="c.id" class="conflict-item ignored-item">
+          <div class="conflict-header">
+            <el-tag :type="severityTag(c.severity)" size="small">{{ severityLabel(c.severity) }}</el-tag>
+            <el-tag type="success" size="small">已解决</el-tag>
+          </div>
+          <div class="conflict-desc">{{ c.description }}</div>
+          <div class="conflict-actions">
             <el-button size="small" type="danger" :icon="Delete" @click="deleteConflict(c.id)">删除</el-button>
           </div>
         </div>

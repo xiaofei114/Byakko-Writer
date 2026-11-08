@@ -7,15 +7,11 @@ import SnapshotManager from '../components/SnapshotManager.vue';
 import CharacterCardManager from '../components/CharacterCardManager.vue';
 import QuickReferencePanel from '../components/QuickReferencePanel.vue';
 import ConflictSidebar from '../components/ConflictSidebar.vue';
+import CanonLedgerDialog from '../components/CanonLedgerDialog.vue';
 import { useBookStore } from '../stores/book';
-import { ChatRound, User, Document, ArrowLeft, Check, View, Edit, WarningFilled } from '@element-plus/icons-vue';
+import { ChatRound, User, Document, ArrowLeft, Check, View, Edit, WarningFilled, Collection } from '@element-plus/icons-vue';
 import { ElMessage } from 'element-plus';
-import { marked } from 'marked';
-
-marked.setOptions({
-  breaks: true,
-  gfm: true
-});
+import { renderMarkdown } from '../utils/markdown';
 
 const bookStore = useBookStore();
 
@@ -29,6 +25,7 @@ const showSnapshotManager = ref(false);
 // 角色卡和大纲相关
 const showCharacterCardManager = ref(false);
 const showQuickOutlinePanel = ref(false);
+const showCanonLedger = ref(false);
 
 // 大纲编辑模式
 const showOutlineEditing = ref(false);
@@ -45,11 +42,6 @@ const outlineDirty = ref(false);
 // 大纲 Markdown 预览模式
 const coarsePreviewMode = ref(true);
 const finePreviewMode = ref(true);
-
-const renderMarkdown = (content: string) => {
-  if (!content) return '';
-  return marked.parse(content);
-};
 
 // 自动保存大纲
 const autoSaveOutline = () => {
@@ -122,6 +114,8 @@ const handleSelectOutline = async (
   }
   
   currentOutlineTarget.value = { level, targetId };
+  // 同步给 AI 对话：让 AI 知道用户正在编辑哪一层大纲
+  bookStore.outlineContext = { level, targetId };
   
   let levelText = '';
   let targetName = '';
@@ -176,6 +170,7 @@ const closeOutlineEditing = async () => {
   coarseOutlineContent.value = '';
   fineOutlineContent.value = '';
   currentOutlineTarget.value = null;
+  bookStore.outlineContext = null;
   outlineDirty.value = false;
 };
 
@@ -190,6 +185,7 @@ const handleSelectChapter = async () => {
   coarseOutlineContent.value = '';
   fineOutlineContent.value = '';
   currentOutlineTarget.value = null;
+  bookStore.outlineContext = null;
   outlineDirty.value = false;
 };
 
@@ -204,6 +200,7 @@ watch(() => bookStore.currentChapterId, async () => {
     coarseOutlineContent.value = '';
     fineOutlineContent.value = '';
     currentOutlineTarget.value = null;
+    bookStore.outlineContext = null;
     outlineDirty.value = false;
   }
 });
@@ -213,6 +210,7 @@ const goHome = async () => {
   if (bookStore.currentChapterId) {
     await bookStore.createImmediateSnapshot('关闭书籍', bookStore.currentChapterId);
   }
+  bookStore.outlineContext = null;
   bookStore.currentBook = null;
   bookStore.currentChapterId = null;
 };
@@ -459,6 +457,13 @@ const handleBeforeUnload = (_e: BeforeUnloadEvent) => {
           @click="showQuickOutlinePanel = true"
         />
       </el-tooltip>
+      <el-tooltip content="设定账本" placement="left">
+        <el-button
+          circle
+          :icon="Collection"
+          @click="showCanonLedger = true"
+        />
+      </el-tooltip>
       <el-tooltip content="检测设定冲突" placement="left">
         <el-button
           circle
@@ -472,6 +477,10 @@ const handleBeforeUnload = (_e: BeforeUnloadEvent) => {
     <!-- 弹窗组件 -->
     <SnapshotManager v-model="showSnapshotManager" />
     <CharacterCardManager v-model="showCharacterCardManager" />
+    <CanonLedgerDialog
+      v-model="showCanonLedger"
+      :book-id="bookStore.currentBook?.id || ''"
+    />
     <QuickReferencePanel 
       v-model="showQuickOutlinePanel" 
       type="outline"

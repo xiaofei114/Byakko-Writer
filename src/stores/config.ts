@@ -2,7 +2,7 @@ import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import type { AppConfig, AIConfig } from '../types';
-import { DEFAULT_CONFIG } from '../config/appConfig';
+import { DEFAULT_CONFIG, FONT_FAMILY_MAP } from '../config/appConfig';
 
 // 后端配置格式
 interface BackendConfig {
@@ -22,6 +22,7 @@ interface BackendConfig {
     temperature: number;
     max_tokens: number;
     max_rounds: number;
+    enable_thinking?: boolean;
   };
 }
 
@@ -56,7 +57,8 @@ export const useConfigStore = defineStore('config', () => {
         model: backend.ai.model,
         temperature: backend.ai.temperature,
         maxTokens: backend.ai.max_tokens,
-        maxRounds: backend.ai.max_rounds || 30
+        maxRounds: backend.ai.max_rounds || 30,
+        enableThinking: backend.ai.enable_thinking ?? true
       }
     };
   };
@@ -79,7 +81,8 @@ export const useConfigStore = defineStore('config', () => {
         model: cfg.ai.model,
         temperature: cfg.ai.temperature,
         max_tokens: cfg.ai.maxTokens,
-        max_rounds: cfg.ai.maxRounds
+        max_rounds: cfg.ai.maxRounds,
+        enable_thinking: cfg.ai.enableThinking
       }
     };
   };
@@ -153,16 +156,10 @@ export const useConfigStore = defineStore('config', () => {
     root.style.setProperty('--nw-primary-lighter', adjustColor(primaryColor, 60));
     root.style.setProperty('--nw-primary-dark', adjustColor(primaryColor, -20));
 
-    // 应用字体设置
-    const fontFamily = config.value.fontFamily;
-    if (fontFamily && fontFamily !== 'system') {
-      root.style.setProperty('--nw-font-body', `"${fontFamily}", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif`);
-      root.style.setProperty('--el-font-family', `"${fontFamily}", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif`);
-    } else {
-      // 系统默认字体
-      root.style.setProperty('--nw-font-body', '"Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif');
-      root.style.setProperty('--el-font-family', '"Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif');
-    }
+    // 应用字体设置（统一走 FONT_FAMILY_MAP，保证回退字体正确）
+    const fontFamily = FONT_FAMILY_MAP[config.value.fontFamily] || FONT_FAMILY_MAP['system'];
+    root.style.setProperty('--nw-font-body', fontFamily);
+    root.style.setProperty('--el-font-family', fontFamily);
 
     // 应用字体大小
     root.style.setProperty('--nw-font-size', `${config.value.fontSize}px`);

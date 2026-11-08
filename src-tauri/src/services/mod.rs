@@ -15,3 +15,6 @@ pub mod agent_orchestrator;
 pub mod conflict_service;
 pub mod story_memory_service;
 pub mod auto_story_memory;
+pub mod secret_service;
+pub mod edit_proposal_service;
+pub mod canon_service;

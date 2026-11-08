@@ -28,12 +28,21 @@ pub async fn send_chat_message_stream(
     session_id: Option<String>,
     book_id: String,
     chapter_id: Option<String>,
+    outline_target: Option<serde_json::Value>,
     message: String,
     config: AIConfig,
 ) -> Result<String, String> {
-    chat_service::send_chat_message_stream(app, session_id, book_id, chapter_id, message, config)
-        .await
-        .map_err(|e| e.to_string())
+    chat_service::send_chat_message_stream(
+        app,
+        session_id,
+        book_id,
+        chapter_id,
+        outline_target,
+        message,
+        config,
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// 获取聊天历史

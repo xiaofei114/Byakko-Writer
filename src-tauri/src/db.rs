@@ -42,9 +42,11 @@ pub async fn init_db() -> anyhow::Result<DbPool> {
     
     // 使用 SqliteConnectOptions 来创建数据库文件（如果不存在）
     let db_url = format!("sqlite:///{}", path_str);
-    println!("数据库URL: {}", db_url);
+    log::debug!("数据库 URL: {}", db_url);
     let connect_options = SqliteConnectOptions::from_str(&db_url)?
-        .create_if_missing(true);
+        .create_if_missing(true)
+        // sqlx 默认已开启，这里显式声明，保证 ON DELETE CASCADE 生效
+        .foreign_keys(true);
     
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
@@ -116,38 +118,9 @@ async fn create_tables(pool: &DbPool) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
     
-    // 快照表（已存在）
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS snapshots (
-            id TEXT PRIMARY KEY,
-            book_id TEXT NOT NULL,
-            name TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            chapter_count INTEGER NOT NULL,
-            total_word_count INTEGER NOT NULL,
-            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
-        )
-        "#
-    )
-    .execute(pool)
-    .await?;
-    
-    // 快照章节内容表
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS snapshot_chapters (
-            snapshot_id TEXT NOT NULL,
-            chapter_id TEXT NOT NULL,
-            title TEXT NOT NULL,
-            content TEXT NOT NULL,
-            PRIMARY KEY (snapshot_id, chapter_id),
-            FOREIGN KEY (snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE
-        )
-        "#
-    )
-    .execute(pool)
-    .await?;
+    // 说明：章节快照保存在每本书独立的 books/<book_id>/chapter_snapshots.db 中，
+    // 主库不再创建旧的整书快照表（snapshots / snapshot_chapters）。
+    // 老版本数据库里如果存在这两张空表，保留不影响运行。
 
     // 章节摘要表
     sqlx::query(
@@ -387,6 +360,17 @@ async fn create_tables(pool: &DbPool) -> anyhow::Result<()> {
         .execute(pool)
         .await?;
 
+    // 冲突与章节/修复状态关联（用于改稿后提示「可能已修复」）
+    let _ = sqlx::query("ALTER TABLE detected_conflicts ADD COLUMN chapter_id TEXT")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE detected_conflicts ADD COLUMN needs_review INTEGER NOT NULL DEFAULT 0")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE detected_conflicts ADD COLUMN resolved_at INTEGER")
+        .execute(pool)
+        .await;
+
     // 故事记忆分组摘要表（每 10 章一组的缓存）
     sqlx::query(
         r#"
@@ -428,6 +412,119 @@ async fn create_tables(pool: &DbPool) -> anyhow::Result<()> {
     )
     .execute(pool)
     .await?;
+
+    // ========== 设定账本（Canon Ledger） ==========
+    // 结构化事实：实体 / 别名 / 状态时间线 / 事件流，用于长篇连续性核对
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS canon_entities (
+            id TEXT PRIMARY KEY,
+            book_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            name TEXT NOT NULL,
+            summary TEXT NOT NULL DEFAULT '',
+            attrs TEXT NOT NULL DEFAULT '{}',
+            first_chapter INTEGER NOT NULL DEFAULT 0,
+            last_chapter INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE,
+            UNIQUE(book_id, kind, name)
+        )
+        "#
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS canon_aliases (
+            book_id TEXT NOT NULL,
+            alias TEXT NOT NULL,
+            alias_key TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            PRIMARY KEY (book_id, alias_key),
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE,
+            FOREIGN KEY (entity_id) REFERENCES canon_entities(id) ON DELETE CASCADE
+        )
+        "#
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS canon_states (
+            id TEXT PRIMARY KEY,
+            book_id TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            chapter_id TEXT NOT NULL,
+            chapter_order INTEGER NOT NULL DEFAULT 0,
+            seq INTEGER NOT NULL,
+            field TEXT NOT NULL,
+            value TEXT NOT NULL,
+            quote TEXT NOT NULL DEFAULT '',
+            created_at INTEGER NOT NULL,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE,
+            FOREIGN KEY (entity_id) REFERENCES canon_entities(id) ON DELETE CASCADE
+        )
+        "#
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS canon_events (
+            id TEXT PRIMARY KEY,
+            book_id TEXT NOT NULL,
+            chapter_id TEXT NOT NULL,
+            chapter_order INTEGER NOT NULL DEFAULT 0,
+            seq INTEGER NOT NULL,
+            subject_id TEXT,
+            subject_name TEXT NOT NULL DEFAULT '',
+            predicate TEXT NOT NULL,
+            object TEXT NOT NULL DEFAULT '',
+            quote TEXT NOT NULL DEFAULT '',
+            importance TEXT NOT NULL DEFAULT 'normal',
+            created_at INTEGER NOT NULL,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+        )
+        "#
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_canon_entities_book ON canon_entities(book_id, kind)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_canon_states_lookup ON canon_states(book_id, entity_id, seq)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_canon_events_book ON canon_events(book_id, seq)")
+        .execute(pool)
+        .await?;
+
+    // 每章抽取记录：用章节 updated_at 判断账本是否过期
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS canon_extractions (
+            chapter_id TEXT PRIMARY KEY,
+            book_id TEXT NOT NULL,
+            content_updated_at INTEGER NOT NULL DEFAULT 0,
+            extracted_at INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+        )
+        "#
+    )
+    .execute(pool)
+    .await?;
+
+    // 人工编辑标记：手工改过的实体不被自动抽取覆盖简介
+    let _ = sqlx::query("ALTER TABLE canon_entities ADD COLUMN manual INTEGER NOT NULL DEFAULT 0")
+        .execute(pool)
+        .await;
 
     // 冲突检测进度跟踪表
     sqlx::query(
@@ -479,17 +576,37 @@ async fn create_tables(pool: &DbPool) -> anyhow::Result<()> {
         .execute(pool)
         .await;
 
+    // 冲突表新增严重程度字段（历史数据默认 medium）
+    let _ = sqlx::query("ALTER TABLE detected_conflicts ADD COLUMN severity TEXT NOT NULL DEFAULT 'medium'")
+        .execute(pool)
+        .await;
+
     Ok(())
 }
 
 /// 获取数据库连接池（单例）
 use std::sync::OnceLock;
 static DB_POOL: OnceLock<DbPool> = OnceLock::new();
+/// 初始化锁：避免并发首次调用时创建多个连接池
+static INIT_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 pub async fn get_pool() -> anyhow::Result<&'static DbPool> {
-    if DB_POOL.get().is_none() {
-        let pool = init_db().await?;
-        let _ = DB_POOL.set(pool);
+    if let Some(pool) = DB_POOL.get() {
+        return Ok(pool);
     }
-    Ok(DB_POOL.get().unwrap())
+
+    let lock = INIT_LOCK.get_or_init(|| tokio::sync::Mutex::new(()));
+    let _guard = lock.lock().await;
+
+    // 双重检查：等锁期间可能已被其它任务初始化
+    if let Some(pool) = DB_POOL.get() {
+        return Ok(pool);
+    }
+
+    let pool = init_db().await?;
+    let _ = DB_POOL.set(pool);
+
+    DB_POOL
+        .get()
+        .ok_or_else(|| anyhow::anyhow!("数据库连接池初始化失败"))
 }

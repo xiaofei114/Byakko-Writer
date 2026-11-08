@@ -141,8 +141,9 @@ export const DEFAULT_AI_CONFIG = {
   apiUrl: AI_PROVIDER_PRESETS.deepseek.apiUrl,
   model: AI_PROVIDER_PRESETS.deepseek.model,
   temperature: 0.7,
-  maxTokens: 2000,
+  maxTokens: 4000,
   maxRounds: 30,
+  enableThinking: true,
 };
 
 export const DEFAULT_CONFIG: AppConfig = {
@@ -168,8 +169,11 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   create_chapter: '创建新章节',
   get_character_card: '查询角色详情',
   create_character_card: '创建角色',
+  update_character_card: '更新角色卡',
   write_chapter: '创作章节',
   save_outline: '保存大纲',
+  propose_edits: '批量修改正文',
+  propose_outlines: '批量修改大纲',
   propose_line_edit: '提议行修改',
   ask_user: '询问用户',
   list_all_chapters: '获取书籍章节列表',

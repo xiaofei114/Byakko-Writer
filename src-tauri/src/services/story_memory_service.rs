@@ -4,6 +4,7 @@ use crate::models::{
     StoryMemoryUpdateResult, GroupProgress,
 };
 use crate::services::ai_service::call_ai_for_large_summary;
+use crate::services::prompt_service::get_prompt_manager;
 use crate::services::summary_generator_service::generate_chapter_summary_for_story_bible;
 use sqlx::Row;
 use tauri::AppHandle;
@@ -90,6 +91,134 @@ pub async fn build_story_memory_text(book_id: &str) -> anyhow::Result<String> {
         Some(memory) => Ok(format_story_memory(&memory)),
         None => Ok(String::new()),
     }
+}
+
+/// 为对话上下文构建故事圣经文本（带预算裁剪）
+///
+/// 100 章之后完整故事圣经会很长，而它会在每一轮决策里重复出现。
+/// 这里按重要性排序拼装，超预算时优先丢掉“关键事件时间线”（可再用工具查询），
+/// 设定类信息（主角状态/角色现状/伏笔/世界规则）优先保留。
+///
+/// - `focus_chapter_id`：当前章节，用于把时间线裁剪到最近剧情附近
+/// - `max_chars`：字符预算（一个汉字按 1 计）
+pub async fn build_story_memory_text_for_context(
+    book_id: &str,
+    focus_chapter_id: Option<&str>,
+    max_chars: usize,
+) -> anyhow::Result<String> {
+    let Some(memory) = get_story_memory(book_id).await? else {
+        return Ok(String::new());
+    };
+
+    // 当前章节序号（用于裁剪时间线）
+    let focus_order: Option<i32> = match focus_chapter_id {
+        Some(cid) => {
+            let pool = get_pool().await?;
+            sqlx::query_scalar::<_, i32>(r#"SELECT "order" FROM chapters WHERE id = ?1"#)
+                .bind(cid)
+                .fetch_optional(pool)
+                .await
+                .ok()
+                .flatten()
+        }
+        None => None,
+    };
+
+    let mut trimmed_timeline = false;
+
+    // 时间线按“最近 50 章”过滤，避免把开书到现在的所有事件都塞进去
+    let timeline_text = {
+        let mut lines = String::new();
+        let mut kept = 0usize;
+        for e in &memory.event_timeline {
+            if let Some(focus) = focus_order {
+                if e.chapter < focus.saturating_sub(50) {
+                    trimmed_timeline = true;
+                    continue;
+                }
+            }
+            let arc_label = if !e.arc.is_empty() {
+                format!(" [{}]", e.arc)
+            } else {
+                String::new()
+            };
+            lines.push_str(&format!(
+                "第{}章「{}」：{}{}\n",
+                e.chapter, e.title, e.event, arc_label
+            ));
+            if !e.impact.is_empty() {
+                lines.push_str(&format!("  → 影响：{}\n", e.impact));
+            }
+            kept += 1;
+        }
+        if kept == 0 {
+            String::new()
+        } else {
+            lines
+        }
+    };
+
+    let mut volume_text = String::new();
+    for v in &memory.volume_summaries {
+        volume_text.push_str(&format!("{}：{}\n", v.title, v.summary));
+    }
+
+    let mut character_text = String::new();
+    for c in &memory.key_character_statuses {
+        character_text.push_str(&format!("- {}：{}，{}\n", c.name, c.status, c.location));
+    }
+
+    let mut thread_text = String::new();
+    for t in &memory.unresolved_threads {
+        thread_text.push_str(&format!("- {}\n", t));
+    }
+
+    // 重要性从高到低；时间线放最后，预算不够时先丢它
+    let sections: Vec<(&str, String)> = vec![
+        ("故事总览", memory.book_summary.clone()),
+        ("主角当前状态", memory.protagonist_status.clone()),
+        ("重要角色现状", character_text),
+        ("未解决伏笔", thread_text),
+        ("世界观关键设定", memory.world_rules.clone()),
+        ("分卷梗概", volume_text),
+        ("关键事件时间线", timeline_text),
+    ];
+
+    let mut text = String::new();
+    let mut used = 0usize;
+    let mut omitted = false;
+
+    for (label, body) in sections {
+        let body = body.trim();
+        if body.is_empty() {
+            continue;
+        }
+
+        let section = format!("【{}】\n{}\n\n", label, body);
+        let section_len = section.chars().count();
+
+        if used + section_len <= max_chars {
+            text.push_str(&section);
+            used += section_len;
+            continue;
+        }
+
+        // 只截断第一个超预算的分段，后续分段保留“已省略”提示
+        if text.is_empty() {
+            let truncated: String = section.chars().take(max_chars).collect();
+            text.push_str(&truncated);
+            text.push_str("\n（已截断）\n");
+            used = max_chars;
+        } else {
+            omitted = true;
+        }
+    }
+
+    if omitted || trimmed_timeline {
+        text.push_str("（以上为与最近剧情相关的设定摘要；更早的细节可用 query_chapter_summary / search_chapter_content 查询）\n");
+    }
+
+    Ok(text.trim_end().to_string())
 }
 
 fn format_story_memory(m: &StoryMemory) -> String {
@@ -329,7 +458,7 @@ async fn update_story_memory_inner(
         )
     };
 
-    let system_prompt = include_str!("../../prompts/agents/story_bible_update.md");
+    let system_prompt = &get_prompt_manager().story_bible_update;
     // 大总结需要大量输出（5000-8000字JSON），使用 32000 max_tokens
     let final_max_tokens = config.max_tokens.max(32000);
     let response = call_ai_for_large_summary(&prompt, system_prompt, &config, final_max_tokens).await?;
@@ -598,7 +727,7 @@ async fn process_groups_parallel(
     groups: &[ChapterGroup],
     config: &crate::models::AIConfig,
 ) -> (Vec<String>, Vec<GroupProgress>) {
-    let system_prompt = include_str!("../../prompts/agents/story_bible_group.md");
+    let system_prompt = get_prompt_manager().story_bible_group.clone();
     let pool = get_pool().await.ok();
 
     let mut tasks = Vec::new();

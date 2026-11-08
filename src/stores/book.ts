@@ -52,6 +52,9 @@ export const useBookStore = defineStore('book', () => {
   const snapshotDebounceTimer = ref<number | null>(null);
   const hasUnsavedChanges = ref(false);
 
+  // 当前正在编辑的大纲目标（由编辑器页同步，AI 对话会带上它）
+  const outlineContext = ref<{ level: 'book' | 'volume' | 'chapter'; targetId?: string } | null>(null);
+
   // Getters
   const volumes = computed(() => {
     if (!currentBook.value) return [];
@@ -164,22 +167,23 @@ export const useBookStore = defineStore('book', () => {
   // Actions
   const createBook = async (title: string, author: string = '', description: string = '') => {
     try {
+      // 后端在同一个事务里创建书籍 + 第一卷 + 第一章，这里不再重复建卷建章
       const meta = await invoke<BookMeta>('create_book', { title, author, description });
       const book = convertBookMeta(meta);
-      currentBook.value = book;
-      currentChapterId.value = null;
-      chapterContents.value.clear();
-      
-      // 创建默认第一章（必须在有卷的情况下）
-      if (book.volumes.length > 0) {
-        const chapter = await createChapter('第一章', book.volumes[0].id);
-        if (!chapter) {
-          throw new Error('创建默认章节失败');
-        }
-      } else {
-        throw new Error('书籍没有卷，无法创建章节');
+
+      if (!book.volumes.length || !book.chapters.length) {
+        throw new Error('创建书籍失败：后端未返回默认卷或章节');
       }
-      
+
+      currentBook.value = book;
+      chapterContents.value.clear();
+      book.chapters.forEach(chapter => {
+        chapterContents.value.set(chapter.id, chapter.content || '');
+      });
+
+      // 选中后端创建的首个章节
+      currentChapterId.value = book.currentChapterId || book.chapters[0].id;
+
       await updateBooksList();
       return book;
     } catch (error) {
@@ -251,7 +255,6 @@ export const useBookStore = defineStore('book', () => {
           // 保存当前章节内容
           if (currentChapter.value && currentChapterId.value) {
             await invoke('save_chapter_content', {
-              bookId: currentBook.value!.id,
               chapterId: currentChapterId.value,
               content: currentContent.value
             });
@@ -404,21 +407,19 @@ export const useBookStore = defineStore('book', () => {
       chapter.updatedAt = Date.now();
       // 调用专门的更新章节标题命令
       await invoke('update_chapter_title', {
-        bookId: currentBook.value.id,
         chapterId,
         title
       });
     }
   };
 
-  const createVolume = async (title: string, order: number) => {
+  const createVolume = async (title: string) => {
     if (!currentBook.value) return null;
     
     try {
       const volumeData = await invoke<VolumeData>('create_volume', {
         bookId: currentBook.value.id,
-        title,
-        order
+        title
       });
       
       const volume: Volume = {
@@ -636,30 +637,36 @@ export const useBookStore = defineStore('book', () => {
     }
   };
 
-  // 恢复章节快照
+  // 恢复章节快照（后端落库 + 自动备份「恢复前」）
   const restoreChapterSnapshot = async (snapshotId: string): Promise<boolean> => {
     if (!currentBook.value) return false;
-    
+
     try {
-      const snapshot = await invoke<ChapterSnapshot>('get_chapter_snapshot', {
+      const result = await invoke<{
+        chapterId: string;
+        chapterTitle: string;
+        content: string;
+        wordCount: number;
+      }>('restore_chapter_snapshot', {
         bookId: currentBook.value.id,
         snapshotId
       });
-      
-      // 恢复章节内容
-      chapterContents.value.set(snapshot.chapter_id, snapshot.content);
-      
-      // 更新章节标题
-      const chapter = currentBook.value.chapters.find(c => c.id === snapshot.chapter_id);
+
+      // 更新本地缓存与章节信息（正文与标题已由后端落库）
+      chapterContents.value.set(result.chapterId, result.content);
+
+      const chapter = currentBook.value.chapters.find(c => c.id === result.chapterId);
       if (chapter) {
-        chapter.title = snapshot.chapter_title;
+        chapter.title = result.chapterTitle;
       }
-      
-      // 如果是当前章节，更新显示
-      if (currentChapterId.value === snapshot.chapter_id) {
-        lastChapterSnapshotContent.value = snapshot.content;
+
+      if (currentChapterId.value === result.chapterId) {
+        lastChapterSnapshotContent.value = result.content;
+        window.dispatchEvent(new CustomEvent('chapter-content-changed', {
+          detail: { chapterId: result.chapterId }
+        }));
       }
-      
+
       return true;
     } catch (error) {
       console.error('恢复章节快照失败:', error);
@@ -1025,6 +1032,7 @@ export const useBookStore = defineStore('book', () => {
     stopAutoSave,
     addMessage,
     clearMessages,
+    outlineContext,
     // 章节快照
     currentChapterSnapshots,
     createChapterSnapshot,

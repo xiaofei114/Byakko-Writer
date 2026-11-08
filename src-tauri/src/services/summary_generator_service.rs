@@ -13,6 +13,60 @@ static GENERATING_CHAPTERS: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| {
     Mutex::new(HashSet::new())
 });
 
+/// 自动摘要调度表：章节ID -> 最近一次保存时间戳（毫秒）
+static AUTO_SUMMARY_TS: Lazy<Mutex<std::collections::HashMap<String, i64>>> =
+    Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
+
+/// 保存章节后调度一次自动摘要
+///
+/// - 防抖 20 秒，期间重复保存会取消上一轮调度
+/// - 内容少于 600 字、已有摘要、未配置 API Key 时跳过
+/// - 真正生成时复用 `generate_chapter_summary_with_lock` 的并发锁
+pub fn schedule_auto_summary(chapter_id: String) {
+    let now = chrono::Utc::now().timestamp_millis();
+
+    if let Ok(mut guard) = AUTO_SUMMARY_TS.lock() {
+        guard.insert(chapter_id.clone(), now);
+    }
+
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+
+        // 期间又保存过 → 放弃本轮调度，由最后一次保存负责
+        let is_latest = AUTO_SUMMARY_TS
+            .lock()
+            .map(|guard| guard.get(&chapter_id).copied() == Some(now))
+            .unwrap_or(false);
+        if !is_latest {
+            return;
+        }
+
+        let config = match crate::services::config_service::load_config() {
+            Ok(config) => config,
+            Err(_) => return,
+        };
+        if config.ai.api_key.is_empty() {
+            return;
+        }
+
+        let (_, _, content) = match get_chapter_info(&chapter_id).await {
+            Ok(info) => info,
+            Err(_) => return,
+        };
+        if content.chars().count() < 600 {
+            return;
+        }
+        if has_summary(&chapter_id).await.unwrap_or(false) {
+            return;
+        }
+
+        match generate_chapter_summary_with_lock(chapter_id.clone(), config.ai).await {
+            Ok(_) => log::info!("[SummaryGenerator] 自动摘要完成: {}", chapter_id),
+            Err(e) => log::debug!("[SummaryGenerator] 自动摘要跳过/失败: {} - {}", chapter_id, e),
+        }
+    });
+}
+
 /// 检查章节是否正在生成摘要
 fn is_generating(chapter_id: &str) -> bool {
     GENERATING_CHAPTERS.lock()
@@ -65,23 +119,44 @@ async fn has_summary(chapter_id: &str) -> anyhow::Result<bool> {
     Ok(count > 0)
 }
 
-/// 获取所有没有摘要的章节
-async fn get_chapters_without_summary(book_id: &str) -> anyhow::Result<Vec<(String, String, String)>> {
+/// 获取没有摘要的章节；传入 only_chapter_id 时只返回该章
+async fn get_chapters_without_summary(
+    book_id: &str,
+    only_chapter_id: Option<&str>,
+) -> anyhow::Result<Vec<(String, String, String)>> {
     let pool = get_pool().await?;
-    
-    let rows = sqlx::query(
-        r#"
-        SELECT c.id, c.title, c.content
-        FROM chapters c
-        LEFT JOIN chapter_summaries s ON c.id = s.chapter_id
-        WHERE c.book_id = ? AND s.id IS NULL AND LENGTH(c.content) >= 50
-        ORDER BY c.created_at ASC
-        "#
-    )
-    .bind(book_id)
-    .fetch_all(pool)
-    .await?;
-    
+
+    let rows = match only_chapter_id {
+        Some(chapter_id) => {
+            sqlx::query(
+                r#"
+                SELECT c.id, c.title, c.content
+                FROM chapters c
+                LEFT JOIN chapter_summaries s ON c.id = s.chapter_id
+                WHERE c.book_id = ?1 AND c.id = ?2 AND s.id IS NULL AND LENGTH(c.content) >= 50
+                "#
+            )
+            .bind(book_id)
+            .bind(chapter_id)
+            .fetch_all(pool)
+            .await?
+        }
+        None => {
+            sqlx::query(
+                r#"
+                SELECT c.id, c.title, c.content
+                FROM chapters c
+                LEFT JOIN chapter_summaries s ON c.id = s.chapter_id
+                WHERE c.book_id = ?1 AND s.id IS NULL AND LENGTH(c.content) >= 50
+                ORDER BY c.created_at ASC
+                "#
+            )
+            .bind(book_id)
+            .fetch_all(pool)
+            .await?
+        }
+    };
+
     let mut chapters = Vec::new();
     for row in rows {
         let id: String = row.try_get("id")?;
@@ -89,7 +164,7 @@ async fn get_chapters_without_summary(book_id: &str) -> anyhow::Result<Vec<(Stri
         let content: String = row.try_get("content")?;
         chapters.push((id, title, content));
     }
-    
+
     Ok(chapters)
 }
 
@@ -183,14 +258,18 @@ async fn generate_chapter_summary_inner(
     Ok(summary)
 }
 
-/// 后台生成所有缺失的摘要（创建新章节后调用）
+/// 后台生成缺失的摘要
+///
+/// - `only_chapter_id = Some(id)`：只处理指定章节（建章时使用，避免全库扫描）
+/// - `only_chapter_id = None`：补齐全书缺失摘要，并发受限（最多 4 个同时请求）
 pub async fn generate_missing_summaries_background(
     book_id: String,
     config: AIConfig,
+    only_chapter_id: Option<String>,
 ) -> anyhow::Result<SummaryGenerationResult> {
-    // 获取所有没有摘要的章节
-    let chapters = get_chapters_without_summary(&book_id).await?;
-    
+    // 获取没有摘要的章节
+    let chapters = get_chapters_without_summary(&book_id, only_chapter_id.as_deref()).await?;
+
     if chapters.is_empty() {
         return Ok(SummaryGenerationResult {
             total: 0,
@@ -200,70 +279,68 @@ pub async fn generate_missing_summaries_background(
             message: "没有需要生成摘要的章节".to_string(),
         });
     }
-    
+
     let total = chapters.len();
     log::info!("[SummaryGenerator] 开始批量生成 {} 个章节的摘要", total);
-    
-    // 使用 tokio::spawn 并发处理
-    let mut handles = Vec::new();
-    
+
+    // 过滤掉正在生成/已有摘要的章节
+    let mut pending = Vec::new();
     for (chapter_id, _title, _content) in chapters {
-        // 检查是否已在生成中
         if is_generating(&chapter_id) {
             log::debug!("[SummaryGenerator] 跳过正在生成中的章节: {}", chapter_id);
             continue;
         }
-        
-        // 检查是否已有摘要
         if has_summary(&chapter_id).await.unwrap_or(false) {
             log::debug!("[SummaryGenerator] 跳过已有摘要的章节: {}", chapter_id);
             continue;
         }
-        
-        let config_clone = config.clone();
-        let chapter_id_clone = chapter_id.clone();
-        
-        let handle = tokio::spawn(async move {
-            match generate_chapter_summary_with_lock(chapter_id_clone.clone(), config_clone).await {
-                Ok(_) => {
-                    log::info!("[SummaryGenerator] 成功: {}", chapter_id_clone);
-                    (true, false)
-                }
-                Err(e) => {
-                    log::error!("[SummaryGenerator] 失败: {} - {}", chapter_id_clone, e);
-                    (false, true)
-                }
-            }
-        });
-        
-        handles.push(handle);
+        pending.push(chapter_id);
     }
-    
-    // 等待所有任务完成
+
+    // 并发上限：避免一次创建几十个 AI 请求触发限流
+    const MAX_CONCURRENCY: usize = 4;
     let mut success = 0;
     let mut failed = 0;
-    
-    for handle in handles {
-        match handle.await {
-            Ok((s, f)) => {
-                if s { success += 1; }
-                if f { failed += 1; }
-            }
-            Err(e) => {
-                log::error!("[SummaryGenerator] 任务执行失败: {}", e);
-                failed += 1;
+
+    for chunk in pending.chunks(MAX_CONCURRENCY) {
+        let mut handles = Vec::new();
+        for chapter_id in chunk {
+            let config_clone = config.clone();
+            let chapter_id_clone = chapter_id.clone();
+            handles.push(tokio::spawn(async move {
+                match generate_chapter_summary_with_lock(chapter_id_clone.clone(), config_clone).await {
+                    Ok(_) => {
+                        log::info!("[SummaryGenerator] 成功: {}", chapter_id_clone);
+                        true
+                    }
+                    Err(e) => {
+                        log::error!("[SummaryGenerator] 失败: {} - {}", chapter_id_clone, e);
+                        false
+                    }
+                }
+            }));
+        }
+
+        for handle in handles {
+            match handle.await {
+                Ok(true) => success += 1,
+                Ok(false) => failed += 1,
+                Err(e) => {
+                    log::error!("[SummaryGenerator] 任务执行失败: {}", e);
+                    failed += 1;
+                }
             }
         }
     }
-    
-    let skipped = total - success - failed;
+
+    let skipped = total.saturating_sub(success + failed);
     let message = format!(
         "批量生成完成: 总计 {}, 成功 {}, 失败 {}, 跳过 {}",
         total, success, failed, skipped
     );
-    
+
     log::info!("[SummaryGenerator] {}", message);
-    
+
     Ok(SummaryGenerationResult {
         total,
         success,

@@ -69,6 +69,16 @@ pub async fn generate_chapter_summary(
     Ok(summary)
 }
 
+/// 删除章节摘要（内容被整体替换/回滚后调用，随后会自动重新生成）
+pub async fn invalidate_chapter_summary(chapter_id: &str) -> anyhow::Result<()> {
+    let pool = get_pool().await?;
+    sqlx::query("DELETE FROM chapter_summaries WHERE chapter_id = ?1")
+        .bind(chapter_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// 保存摘要到数据库
 pub async fn save_summary_to_db(summary: &ChapterSummary) -> anyhow::Result<()> {
     let pool = get_pool().await?;
@@ -105,7 +115,45 @@ pub async fn save_summary_to_db(summary: &ChapterSummary) -> anyhow::Result<()> 
     .bind(summary.is_confirmed)
     .execute(pool)
     .await?;
-    
+
+    // 摘要落库后，后台抽取本章设定到账本（Canon Ledger）
+    let chapter_id = summary.chapter_id.clone();
+    tauri::async_runtime::spawn(async move {
+        let config = match crate::services::config_service::load_config() {
+            Ok(config) => config,
+            Err(_) => return,
+        };
+        if config.ai.api_key.is_empty() {
+            return;
+        }
+
+        let pool = match get_pool().await {
+            Ok(pool) => pool,
+            Err(_) => return,
+        };
+        let book_id: Option<String> =
+            sqlx::query_scalar("SELECT book_id FROM chapters WHERE id = ?1")
+                .bind(&chapter_id)
+                .fetch_optional(pool)
+                .await
+                .ok()
+                .flatten();
+
+        let Some(book_id) = book_id else {
+            return;
+        };
+
+        if let Err(e) = crate::services::canon_service::extract_from_chapter(
+            &book_id,
+            &chapter_id,
+            &config.ai,
+        )
+        .await
+        {
+            log::warn!("[Canon] 章节 {} 设定抽取失败: {}", chapter_id, e);
+        }
+    });
+
     Ok(())
 }
 
@@ -158,12 +206,17 @@ pub async fn load_chapter_summary(chapter_id: String) -> anyhow::Result<Option<C
 }
 
 /// 查询章节详细摘要
+///
+/// 会把增强字段（剧情推进 / 情感节点 / 伏笔 / 未解决线索）一并返回。
+/// 这些是保持长篇设定连续性最关键的字段，之前存了却没返回给 AI。
 pub async fn query_chapter_summary(chapter_id: &str) -> anyhow::Result<String> {
     let pool = get_pool().await?;
-    
+
     let row = sqlx::query(
         r#"
-        SELECT c.title, s.short_summary, s.long_summary, s.tags, s.characters, s.locations, s.events
+        SELECT c.title,
+               s.short_summary, s.long_summary, s.tags, s.characters, s.locations, s.events,
+               s.plot_progression, s.emotional_beats, s.foreshadowing, s.unresolved_threads
         FROM chapters c
         LEFT JOIN chapter_summaries s ON c.id = s.chapter_id
         WHERE c.id = ?
@@ -175,29 +228,87 @@ pub async fn query_chapter_summary(chapter_id: &str) -> anyhow::Result<String> {
 
     let row = match row {
         Some(r) => r,
-        None => return Ok(format!("章节 {} 不存在或没有摘要", chapter_id)),
+        None => return Ok(format!("章节 {} 不存在", chapter_id)),
     };
 
     let title: String = row.try_get("title")?;
-    let short_summary: Option<String> = row.try_get("short_summary").ok();
-    let long_summary: Option<String> = row.try_get("long_summary").ok();
-    let tags: Option<String> = row.try_get("tags").ok();
-    let characters: Option<String> = row.try_get("characters").ok();
-    let locations: Option<String> = row.try_get("locations").ok();
-    let events: Option<String> = row.try_get("events").ok();
-    
-    let result = format!(
-        "章节：{}\n短摘要：{}\n详细摘要：{}\n标签：{}\n角色：{}\n地点：{}\n事件：{}",
-        title,
-        short_summary.unwrap_or_default(),
-        long_summary.unwrap_or_default(),
-        tags.unwrap_or_default(),
-        characters.unwrap_or_default(),
-        locations.unwrap_or_default(),
-        events.unwrap_or_default()
-    );
-    
-    Ok(result)
+    let short_summary: Option<String> = row.try_get::<Option<String>, _>("short_summary").ok().flatten();
+    let long_summary: Option<String> = row.try_get::<Option<String>, _>("long_summary").ok().flatten();
+
+    if short_summary.is_none() && long_summary.is_none() {
+        return Ok(format!(
+            "章节「{}」暂无摘要（ID: {}）。如需了解内容，请用 query_chapter_content 读取正文。",
+            title, chapter_id
+        ));
+    }
+
+    // JSON 字符串数组格式化：["a","b"] -> "a、b"
+    fn format_list(raw: Option<String>) -> String {
+        let raw = match raw {
+            Some(s) if !s.trim().is_empty() => s,
+            _ => return String::new(),
+        };
+        match serde_json::from_str::<Vec<String>>(&raw) {
+            Ok(list) => {
+                let items: Vec<String> = list
+                    .into_iter()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                items.join("、")
+            }
+            Err(_) => raw,
+        }
+    }
+
+    let mut result = format!("章节：{}\n短摘要：{}\n", title, short_summary.unwrap_or_default());
+
+    if let Some(long) = long_summary.filter(|s| !s.trim().is_empty()) {
+        result.push_str(&format!("详细摘要：{}\n", long));
+    }
+
+    if let Some(plot) = row.try_get::<Option<String>, _>("plot_progression").ok().flatten() {
+        if !plot.trim().is_empty() {
+            result.push_str(&format!("剧情推进：{}\n", plot.trim()));
+        }
+    }
+
+    let emotional = format_list(row.try_get::<Option<String>, _>("emotional_beats").ok().flatten());
+    if !emotional.is_empty() {
+        result.push_str(&format!("情感节点：{}\n", emotional));
+    }
+
+    let foreshadowing = format_list(row.try_get::<Option<String>, _>("foreshadowing").ok().flatten());
+    if !foreshadowing.is_empty() {
+        result.push_str(&format!("伏笔：{}\n", foreshadowing));
+    }
+
+    let threads = format_list(row.try_get::<Option<String>, _>("unresolved_threads").ok().flatten());
+    if !threads.is_empty() {
+        result.push_str(&format!("未解决线索：{}\n", threads));
+    }
+
+    let tags = format_list(row.try_get::<Option<String>, _>("tags").ok().flatten());
+    if !tags.is_empty() {
+        result.push_str(&format!("标签：{}\n", tags));
+    }
+
+    let characters = format_list(row.try_get::<Option<String>, _>("characters").ok().flatten());
+    if !characters.is_empty() {
+        result.push_str(&format!("角色：{}\n", characters));
+    }
+
+    let locations = format_list(row.try_get::<Option<String>, _>("locations").ok().flatten());
+    if !locations.is_empty() {
+        result.push_str(&format!("地点：{}\n", locations));
+    }
+
+    let events = format_list(row.try_get::<Option<String>, _>("events").ok().flatten());
+    if !events.is_empty() {
+        result.push_str(&format!("事件：{}\n", events));
+    }
+
+    Ok(result.trim_end().to_string())
 }
 
 /// 查询完整章节内容

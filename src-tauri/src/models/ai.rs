@@ -17,6 +17,13 @@ pub struct AIConfig {
     pub max_tokens: i32,
     #[serde(alias = "maxRounds", default = "default_max_rounds")]
     pub max_rounds: i32,
+    /// 思考模式：先让 AI 分析需求并制定计划，再进入工具循环
+    #[serde(alias = "enableThinking", default = "default_enable_thinking")]
+    pub enable_thinking: bool,
+}
+
+fn default_enable_thinking() -> bool {
+    true
 }
 
 impl Default for AIConfig {
@@ -29,6 +36,7 @@ impl Default for AIConfig {
             temperature: default_temperature(),
             max_tokens: default_max_tokens(),
             max_rounds: default_max_rounds(),
+            enable_thinking: default_enable_thinking(),
         }
     }
 }
@@ -37,7 +45,8 @@ fn default_provider() -> String { "deepseek".to_string() }
 fn default_api_url() -> String { "https://api.deepseek.com/v1".to_string() }
 fn default_model() -> String { "deepseek-chat".to_string() }
 fn default_temperature() -> f32 { 0.7 }
-fn default_max_tokens() -> i32 { 10000 }
+/// 与前端 DEFAULT_AI_CONFIG.maxTokens、设置面板上限保持一致
+fn default_max_tokens() -> i32 { 4000 }
 fn default_max_rounds() -> i32 { 30 }
 
 /// 工具调用定义
@@ -99,6 +108,9 @@ pub struct ResponseMessage {
     pub content: Option<String>,
     #[serde(default)]
     pub tool_calls: Option<Vec<ToolCallDefinition>>,
+    /// 推理模型返回的思考内容（DeepSeek reasoner / Qwen 等）
+    #[serde(default, alias = "reasoning")]
+    pub reasoning_content: Option<String>,
 }
 
 /// AI 决策结果（function calling 返回的结构化结果）
@@ -108,6 +120,8 @@ pub struct AiDecision {
     pub content: Option<String>,
     /// 工具调用列表（需要执行工具时）
     pub tool_calls: Option<Vec<ToolCallDefinition>>,
+    /// 模型自带的思考内容（如果有）
+    pub reasoning: Option<String>,
 }
 
 impl AiDecision {

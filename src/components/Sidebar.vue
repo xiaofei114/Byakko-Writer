@@ -256,8 +256,7 @@ const confirmNewVolume = async () => {
     return;
   }
   
-  const order = bookStore.volumes.length;
-  await bookStore.createVolume(title, order);
+  await bookStore.createVolume(title);
   newVolumeDialogVisible.value = false;
   ElMessage.success('卷创建成功');
 };

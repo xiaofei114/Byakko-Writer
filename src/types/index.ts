@@ -37,6 +37,7 @@ export interface AIConfig {
   temperature: number;
   maxTokens: number;
   maxRounds: number;
+  enableThinking: boolean;
 }
 
 export interface AppConfig {
@@ -116,7 +117,7 @@ export interface AIChatMessage {
   bookId: string;
   chapterId?: string;
   sessionId: string;
-  role: 'user' | 'assistant' | 'system' | 'tool' | 'outline' | 'write' | 'conflict' | 'line_edit' | 'ask_user';
+  role: 'user' | 'assistant' | 'system' | 'tool' | 'outline' | 'write' | 'conflict' | 'line_edit' | 'ask_user' | 'edit_proposal' | 'outline_proposal' | 'thinking';
   content: string;
   contextType?: 'normal' | 'rag' | 'summary';
   timestamp: number;
@@ -125,6 +126,45 @@ export interface AIChatMessage {
   polishHandled?: boolean; // 润色是否已处理（应用或取消）
   isHandled?: boolean; // 是否已处理（用于line_edit和ask_user）
   handledStatus?: string; // 持久化处理状态（从DB的handled_status列）
+  thinkingLabel?: string; // 思考块标签（计划/第 N 轮反思）
+}
+
+// ==================== 批量编辑提案 ====================
+
+export interface EditProposalItem {
+  lineNumber: number;
+  originalText: string;
+  newText: string;
+  reason?: string;
+  matched: boolean;
+  before: string;
+  message: string;
+}
+
+export interface EditProposal {
+  proposalId: string;
+  chapterId: string;
+  summary: string;
+  replaceAll: string | null;
+  content: string;
+  edits: EditProposalItem[];
+  status: 'pending' | 'applied' | 'rejected';
+}
+
+export interface OutlineProposalItem {
+  level: 'book' | 'volume' | 'chapter';
+  volumeId: string;
+  chapterId: string;
+  outlineType: 'coarse' | 'fine';
+  content: string;
+  label: string;
+}
+
+export interface OutlineProposal {
+  proposalId: string;
+  summary: string;
+  outlines: OutlineProposalItem[];
+  status: 'pending' | 'applied' | 'rejected';
 }
 
 export interface ChatSession {
@@ -219,6 +259,9 @@ export interface DetectedConflict {
   detectedAt: number;
   isIgnored: number;
   ignoredAt?: number;
+  chapterId?: string;
+  needsReview?: number;
+  resolvedAt?: number;
 }
 
 export interface ConflictCheckResult {

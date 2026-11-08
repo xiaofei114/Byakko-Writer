@@ -26,23 +26,33 @@ onMounted(async () => {
   await bookStore.updateBooksList();
 });
 
+const isCreating = ref(false);
+
 const createBook = async () => {
   if (!newBookTitle.value.trim()) {
     ElMessage.warning('请输入书名');
     return;
   }
+  if (isCreating.value) return;
 
-  await bookStore.createBook(
-    newBookTitle.value.trim(),
-    newBookAuthor.value.trim(),
-    newBookDescription.value.trim()
-  );
+  isCreating.value = true;
+  try {
+    await bookStore.createBook(
+      newBookTitle.value.trim(),
+      newBookAuthor.value.trim(),
+      newBookDescription.value.trim()
+    );
 
-  showCreateDialog.value = false;
-  newBookTitle.value = '';
-  newBookAuthor.value = '';
-  newBookDescription.value = '';
-  ElMessage.success('书籍创建成功');
+    showCreateDialog.value = false;
+    newBookTitle.value = '';
+    newBookAuthor.value = '';
+    newBookDescription.value = '';
+    ElMessage.success('书籍创建成功');
+  } catch (error) {
+    showSimpleError(error);
+  } finally {
+    isCreating.value = false;
+  }
 };
 
 const openBook = (bookId: string) => {
@@ -243,6 +253,7 @@ const formatDate = (timestamp: number) => {
           type="primary" 
           @click="createBook" 
           :disabled="!newBookTitle.trim()"
+          :loading="isCreating"
           size="large"
         >
           创建

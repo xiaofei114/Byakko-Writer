@@ -61,6 +61,80 @@ pub async fn save_assistant_message(
     Ok(message_id)
 }
 
+/// 读取最近若干条可复用的对话消息（进程重启后恢复 Agent 上下文）
+///
+/// 只取 user / assistant 两类消息；单条最多 1000 字，
+/// 避免历史里的长文（比如整章正文）把上下文吃满。
+pub async fn load_recent_messages(
+    session_id: &str,
+    limit: i64,
+) -> anyhow::Result<Vec<crate::models::ChatMessage>> {
+    let pool = get_pool().await?;
+
+    let rows = sqlx::query(
+        r#"
+        SELECT role, content FROM chat_messages
+        WHERE session_id = ?1 AND role IN ('user', 'assistant')
+        ORDER BY timestamp DESC
+        LIMIT ?2
+        "#
+    )
+    .bind(session_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    let mut messages = Vec::new();
+    for row in rows.iter().rev() {
+        let role: String = row.try_get("role").unwrap_or_default();
+        let content: String = row.try_get("content").unwrap_or_default();
+        if content.trim().is_empty() {
+            continue;
+        }
+        let content = truncate_chars(&content, 1000);
+        messages.push(crate::models::ChatMessage::new(&role, &content));
+    }
+
+    Ok(messages)
+}
+
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(max_chars).collect::<String>())
+    }
+}
+
+/// 保存思考过程（思考模式产出的内部计划，刷新后可回看）
+pub async fn save_thinking_message(
+    session_id: &str,
+    book_id: &str,
+    chapter_id: Option<&str>,
+    content: &str,
+) -> anyhow::Result<String> {
+    let pool = get_pool().await?;
+    let now = chrono::Utc::now().timestamp_millis();
+    let message_id = format!("thinking_{}_{}", now, rand::random::<u16>());
+
+    sqlx::query(
+        r#"
+        INSERT INTO chat_messages (id, session_id, book_id, chapter_id, role, content, timestamp)
+        VALUES (?1, ?2, ?3, ?4, 'thinking', ?5, ?6)
+        "#,
+    )
+    .bind(&message_id)
+    .bind(session_id)
+    .bind(book_id)
+    .bind(chapter_id)
+    .bind(content)
+    .bind(now)
+    .execute(pool)
+    .await?;
+
+    Ok(message_id)
+}
+
 /// 保存工具调用摘要（恢复历史时显示工具调用流程，不含返回结果）
 pub async fn save_tool_call_summary(
     session_id: &str,
@@ -157,6 +231,7 @@ pub async fn send_chat_message_stream(
     session_id: Option<String>,
     book_id: String,
     chapter_id: Option<String>,
+    outline_target: Option<serde_json::Value>,
     message: String,
     config: AIConfig,
 ) -> anyhow::Result<String> {
@@ -183,6 +258,8 @@ pub async fn send_chat_message_stream(
         &app,
         &session_id,
         &book_id,
+        chapter_id.as_deref(),
+        outline_target.as_ref(),
         &message,
         config,
     ).await?;
@@ -306,6 +383,9 @@ pub async fn delete_chat_session(session_id: &str) -> anyhow::Result<()> {
         .bind(session_id)
         .execute(pool)
         .await?;
+
+    // 同步清理内存中的 Agent 会话状态，避免残留占用
+    crate::services::agent_orchestrator::forget_session_state(session_id);
 
     Ok(())
 }

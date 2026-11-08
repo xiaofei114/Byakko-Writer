@@ -7,6 +7,8 @@ pub mod config_commands;
 pub mod style_commands;
 pub mod conflict_commands;
 pub mod story_memory_commands;
+pub mod edit_commands;
+pub mod canon_commands;
 
 pub use book_commands::*;
 pub use ai_commands::*;
@@ -17,3 +19,5 @@ pub use config_commands::*;
 pub use style_commands::*;
 pub use conflict_commands::*;
 pub use story_memory_commands::*;
+pub use edit_commands::*;
+pub use canon_commands::*;

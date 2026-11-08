@@ -1,6 +1,19 @@
 use crate::models::ToolCall;
 use sqlx::Row;
 
+/// 按字符截断文本
+fn truncate_text(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        format!(
+            "{}…（内容过长已截断，共 {} 字；可用具体工具查询细节）",
+            s.chars().take(max_chars).collect::<String>(),
+            s.chars().count()
+        )
+    }
+}
+
 /// 执行工具调用（bookId 由调用方自动注入）
 pub async fn execute_tool_call(tool_call: &ToolCall, book_id: &str) -> anyhow::Result<String> {
     log::info!("执行工具调用: {}", tool_call.name);
@@ -9,24 +22,74 @@ pub async fn execute_tool_call(tool_call: &ToolCall, book_id: &str) -> anyhow::R
     match tool_call.name.as_str() {
         // 书籍信息工具
         "get_book_info" => {
-            let book = crate::services::book_service::load_book(book_id.to_string()).await?;
-            let volumes_text: String = book.volumes.iter()
-                .map(|v| {
-                    let ch_count = book.chapters.iter().filter(|c| c.volume_id == v.id).count();
-                    format!("- {}（{}章，ID: {}）", v.title, ch_count, v.id)
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
+            // 只查元数据，不再 load_book（那会把全书正文都读进内存）
+            let pool = crate::db::get_pool().await?;
+
+            let row = sqlx::query("SELECT title, author, description FROM books WHERE id = ?1")
+                .bind(book_id)
+                .fetch_optional(pool)
+                .await?;
+
+            let Some(row) = row else {
+                return Ok(format!("书籍 {} 不存在", book_id));
+            };
+
+            let title: String = row.try_get("title").unwrap_or_default();
+            let author: String = row.try_get("author").unwrap_or_default();
+            let description: String = row.try_get("description").unwrap_or_default();
+
+            let volume_rows = sqlx::query(
+                r#"SELECT id, title FROM volumes WHERE book_id = ?1 ORDER BY "order""#,
+            )
+            .bind(book_id)
+            .fetch_all(pool)
+            .await?;
+
+            let chapter_stats = sqlx::query(
+                r#"
+                SELECT volume_id, COUNT(*) AS cnt, COALESCE(SUM(word_count), 0) AS words
+                FROM chapters WHERE book_id = ?1 GROUP BY volume_id
+                "#,
+            )
+            .bind(book_id)
+            .fetch_all(pool)
+            .await?;
+
+            let mut stat_map: std::collections::HashMap<String, (i64, i64)> = std::collections::HashMap::new();
+            for stat in &chapter_stats {
+                let volume_id: String = stat.try_get("volume_id").unwrap_or_default();
+                let count: i64 = stat.try_get("cnt").unwrap_or(0);
+                let words: i64 = stat.try_get("words").unwrap_or(0);
+                stat_map.insert(volume_id, (count, words));
+            }
+
+            let mut volumes_text = String::new();
+            let mut total_chapters = 0i64;
+            let mut total_words = 0i64;
+
+            for volume in &volume_rows {
+                let id: String = volume.try_get("id")?;
+                let volume_title: String = volume.try_get("title")?;
+                let (count, words) = stat_map.get(&id).copied().unwrap_or((0, 0));
+                total_chapters += count;
+                total_words += words;
+                volumes_text.push_str(&format!(
+                    "- {}（{}章，{}字，ID: {}）\n",
+                    volume_title, count, words, id
+                ));
+            }
+
             let result = format!(
                 "书名：{}\n作者：{}\n简介：{}\n卷数：{}\n章节数：{}\n总字数：{}\n\n卷列表：\n{}",
-                book.title,
-                if book.author.is_empty() { "未设置" } else { &book.author },
-                if book.description.is_empty() { "暂无简介" } else { &book.description },
-                book.volumes.len(),
-                book.chapters.len(),
-                book.chapters.iter().map(|c| c.word_count).sum::<i64>(),
-                if volumes_text.is_empty() { "暂无卷" } else { &volumes_text }
+                title,
+                if author.is_empty() { "未设置".to_string() } else { author },
+                if description.is_empty() { "暂无简介".to_string() } else { description },
+                volume_rows.len(),
+                total_chapters,
+                total_words,
+                if volumes_text.is_empty() { "暂无卷".to_string() } else { volumes_text }
             );
+
             Ok(result)
         }
         // 章节相关工具
@@ -58,7 +121,15 @@ pub async fn execute_tool_call(tool_call: &ToolCall, book_id: &str) -> anyhow::R
 
             let (from, to) = match (start, end) {
                 (None, None) => {
-                    // 全文
+                    // 全文：过长时截断，避免一次把上下文塞满（AI 可用行号范围继续读）
+                    let char_count = content.chars().count();
+                    if char_count > 12000 {
+                        let head: String = content.chars().take(12000).collect();
+                        return Ok(format!(
+                            "章节共{}行、{}字，内容较长，以下为前 12000 字；如需其余部分请用 startLine/endLine 读取：\n{}",
+                            total, char_count, head
+                        ));
+                    }
                     return Ok(format!("章节共{}行，全文如下：\n{}", total, content));
                 }
                 (Some(s), None) => {
@@ -226,69 +297,74 @@ pub async fn execute_tool_call(tool_call: &ToolCall, book_id: &str) -> anyhow::R
         "search_chapter_content" => {
             let keyword = tool_call.arguments.get("keyword")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("缺少 keyword 参数"))?;
+                .ok_or_else(|| anyhow::anyhow!("缺少 keyword 参数"))?
+                .trim();
+            if keyword.is_empty() {
+                return Err(anyhow::anyhow!("keyword 不能为空"));
+            }
+
             let use_regex = tool_call.arguments.get("regex")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            let chapter_id = tool_call.arguments.get("chapterId").and_then(|v| v.as_str());
 
             let re = if use_regex {
                 Some(regex::Regex::new(keyword).map_err(|e| anyhow::anyhow!("正则无效: {}", e))?)
             } else {
                 None
             };
-            let kw_lower = if use_regex { String::new() } else { keyword.to_lowercase() };
 
-            let is_match = |line: &str| -> bool {
-                if let Some(ref re) = re {
-                    re.is_match(line)
-                } else {
-                    line.to_lowercase().contains(&kw_lower)
-                }
+            // 普通搜索：自动展开角色别名（林动 / 小动 / 林兄 都能命中同一人）
+            let terms = if use_regex {
+                vec![keyword.to_string()]
+            } else {
+                expand_search_terms(book_id, keyword).await?
             };
 
-            if let Some(chapter_id) = tool_call.arguments.get("chapterId").and_then(|v| v.as_str()) {
-                let content = crate::services::summary_service::query_chapter_content(chapter_id)
-                    .await
-                    .unwrap_or_else(|e| format!("查询章节内容失败：{}", e));
-                let matches: Vec<String> = content.lines()
-                    .enumerate()
-                    .filter(|(_, line)| is_match(line))
-                    .map(|(i, line)| format!("第{}行: {}", i + 1, line.trim()))
-                    .collect();
-                if matches.is_empty() {
-                    Ok(format!("在章节 {} 中未找到匹配", chapter_id))
-                } else {
-                    Ok(format!("在章节 {} 搜索到 {} 处匹配：\n{}",
-                        chapter_id, matches.len(), matches.join("\n")))
-                }
-            } else {
-                let chapters = crate::services::book_service::load_book(book_id.to_string()).await?;
-                let mut result = String::new();
-                let mut total_all = 0;
-                for ch in &chapters.chapters {
-                    if ch.content.is_empty() { continue; }
-                    let matches: Vec<String> = ch.content.lines()
-                        .enumerate()
-                        .filter(|(_, line)| is_match(line))
-                        .map(|(i, line)| format!("  第{}行: {}", i + 1, line.trim()))
-                        .collect();
-                    if !matches.is_empty() {
-                        total_all += matches.len();
-                        result.push_str(&format!("「{}」(ID:{}): {} 处\n{}\n",
-                            ch.title, ch.id, matches.len(), matches.join("\n")));
-                    }
-                }
-                if total_all == 0 {
-                    Ok(format!("全书未找到匹配"))
-                } else {
-                    Ok(format!("全书搜索到 {} 处匹配：\n{}", total_all, result))
-                }
-            }
+            search_book_content(book_id, chapter_id, &terms, keyword, re.as_ref()).await
         }
 
         // 故事记忆相关工具
         "get_story_memory" => {
-            crate::services::story_memory_service::build_story_memory_text(book_id).await
+            let text = crate::services::story_memory_service::build_story_memory_text(book_id).await?;
+            // 长篇故事圣经可能很长，限制返回体积，避免一次把上下文吃满
+            Ok(truncate_text(&text, 12000))
+        }
+        // 设定账本（Canon Ledger）
+        "get_canon" => {
+            let names: Vec<String> = tool_call.arguments.get("names")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
+            if names.is_empty() {
+                return Err(anyhow::anyhow!("缺少 names 参数"));
+            }
+            let as_of = tool_call.arguments.get("asOfChapter")
+                .and_then(|v| v.as_i64())
+                .map(|v| v as i32);
+            crate::services::canon_service::get_canon(book_id, &names, as_of).await
+        }
+        "search_canon" => {
+            let query = tool_call.arguments.get("query")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let kind = tool_call.arguments.get("kind").and_then(|v| v.as_str());
+            crate::services::canon_service::search_canon(book_id, query, kind).await
+        }
+        "get_canon_timeline" => {
+            let name = tool_call.arguments.get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if name.is_empty() {
+                return Err(anyhow::anyhow!("缺少 name 参数"));
+            }
+            let from = tool_call.arguments.get("fromChapter")
+                .and_then(|v| v.as_i64())
+                .map(|v| v as i32);
+            let to = tool_call.arguments.get("toChapter")
+                .and_then(|v| v.as_i64())
+                .map(|v| v as i32);
+            crate::services::canon_service::get_canon_timeline(book_id, name, from, to).await
         }
         "get_character_timeline" => {
             let name = tool_call.arguments.get("characterName")
@@ -403,7 +479,7 @@ pub async fn execute_tool_call(tool_call: &ToolCall, book_id: &str) -> anyhow::R
             } else {
                 // 查询最后一卷
                 let pool = crate::db::get_pool().await?;
-                let row = sqlx::query("SELECT id FROM volumes WHERE book_id = ? ORDER BY created_at DESC LIMIT 1")
+                let row = sqlx::query("SELECT id FROM volumes WHERE book_id = ? ORDER BY \"order\" DESC LIMIT 1")
                     .bind(book_id)
                     .fetch_optional(pool)
                     .await?;
@@ -413,18 +489,18 @@ pub async fn execute_tool_call(tool_call: &ToolCall, book_id: &str) -> anyhow::R
                 }
             };
 
-            // 获取order：如果指定了就用指定的，否则自动计算
+            // 获取order：如果指定了就用指定的，否则自动计算（列名是 "order"，不是 order_num）
             let order = if let Some(ord) = tool_call.arguments.get("order").and_then(|v| v.as_i64()) {
                 ord as i32
             } else {
-                // 查询当前最大order
                 let pool = crate::db::get_pool().await?;
-                let row = sqlx::query("SELECT MAX(order_num) as max_order FROM chapters WHERE book_id = ?")
-                    .bind(book_id)
-                    .fetch_one(pool)
-                    .await?;
-                let max_order: Option<i32> = row.try_get("max_order")?;
-                max_order.unwrap_or(0) + 1
+                let max_order: Option<i32> = sqlx::query_scalar(
+                    "SELECT MAX(\"order\") FROM chapters WHERE book_id = ?1"
+                )
+                .bind(book_id)
+                .fetch_one(pool)
+                .await?;
+                max_order.unwrap_or(-1) + 1
             };
 
             // 获取或生成标题
@@ -486,4 +562,241 @@ async fn get_all_chapter_summaries_for_tool(book_id: &str) -> anyhow::Result<Vec
     }
 
     Ok(chapters)
+}
+
+// ==================== 全文搜索（别名展开 + 排序 + 截断） ====================
+
+/// 单章最多展示多少处命中
+const MAX_SNIPPETS_PER_CHAPTER: usize = 6;
+/// 一次搜索最多展示多少章
+const MAX_CHAPTERS: usize = 8;
+/// 一次搜索最多展示多少处命中
+const MAX_TOTAL_SNIPPETS: usize = 30;
+/// 单条命中片段最大字符数
+const MAX_SNIPPET_CHARS: usize = 160;
+
+/// 把关键词扩展到角色卡里的规范名 + 别名。
+///
+/// 例：搜「小动」时若角色卡是 `林动` 别名 `[小动, 林兄]`，
+/// 则同时搜索这三个称呼，避免同一角色因称呼不同而漏查。
+async fn expand_search_terms(book_id: &str, keyword: &str) -> anyhow::Result<Vec<String>> {
+    let keyword = keyword.trim();
+    let mut terms: Vec<String> = vec![keyword.to_string()];
+
+    // 单字关键词展开噪音太大，直接原样搜
+    if keyword.chars().count() < 2 {
+        return Ok(terms);
+    }
+
+    let kw = keyword.to_lowercase();
+    let pool = crate::db::get_pool().await?;
+    let rows = sqlx::query("SELECT name, aliases FROM character_cards WHERE book_id = ?1")
+        .bind(book_id)
+        .fetch_all(pool)
+        .await?;
+
+    for row in rows {
+        let name: String = row.try_get("name").unwrap_or_default();
+        if name.trim().is_empty() {
+            continue;
+        }
+
+        let mut names = vec![name.clone()];
+        let aliases_raw: Option<String> = row.try_get("aliases").ok();
+        if let Some(raw) = aliases_raw {
+            if let Ok(list) = serde_json::from_str::<Vec<String>>(&raw) {
+                for alias in list {
+                    let alias = alias.trim().to_string();
+                    if !alias.is_empty() {
+                        names.push(alias);
+                    }
+                }
+            }
+        }
+
+        // 关键词与任一称呼互相包含即视为同一角色
+        // 单字称呼（如「林」）参与模糊匹配会引入大量噪音，跳过
+        let hit = names.iter().any(|n| {
+            let n_lower = n.to_lowercase();
+            if n_lower.chars().count() < 2 {
+                return false;
+            }
+            n_lower.contains(&kw) || kw.contains(&n_lower)
+        });
+
+        if hit {
+            for n in names {
+                if !terms.iter().any(|t| t.eq_ignore_ascii_case(&n)) {
+                    terms.push(n);
+                }
+            }
+        }
+    }
+
+    Ok(terms)
+}
+
+/// 全书/指定章节搜索，返回带行号和上下文的命中片段（有排序和数量上限）
+async fn search_book_content(
+    book_id: &str,
+    chapter_id: Option<&str>,
+    terms: &[String],
+    raw_keyword: &str,
+    re: Option<&regex::Regex>,
+) -> anyhow::Result<String> {
+    let pool = crate::db::get_pool().await?;
+
+    let rows = match chapter_id {
+        Some(cid) => {
+            sqlx::query(
+                r#"SELECT id, title, content, "order" FROM chapters WHERE id = ?1 AND book_id = ?2"#
+            )
+            .bind(cid)
+            .bind(book_id)
+            .fetch_all(pool)
+            .await?
+        }
+        None => {
+            sqlx::query(
+                r#"SELECT id, title, content, "order" FROM chapters WHERE book_id = ?1 ORDER BY "order""#
+            )
+            .bind(book_id)
+            .fetch_all(pool)
+            .await?
+        }
+    };
+
+    struct Hit {
+        chapter_id: String,
+        title: String,
+        order: i32,
+        total: usize,
+        snippets: Vec<String>,
+        title_matched: bool,
+    }
+
+    let term_lowers: Vec<String> = terms.iter().map(|t| t.to_lowercase()).collect();
+    let mut hits: Vec<Hit> = Vec::new();
+    let mut total_all: usize = 0;
+
+    for row in rows {
+        let id: String = row.try_get("id")?;
+        let title: String = row.try_get("title")?;
+        let content: String = row.try_get("content").unwrap_or_default();
+        let order: i32 = row.try_get("order").unwrap_or(0);
+
+        let title_lower = title.to_lowercase();
+        let title_matched = re
+            .map(|r| r.is_match(&title))
+            .unwrap_or_else(|| term_lowers.iter().any(|t| title_lower.contains(t)));
+
+        if content.is_empty() && !title_matched {
+            continue;
+        }
+
+        let mut total = 0usize;
+        let mut snippets: Vec<String> = Vec::new();
+
+        for (idx, line) in content.lines().enumerate() {
+            let matched = match re {
+                Some(r) => r.is_match(line),
+                None => {
+                    let lower = line.to_lowercase();
+                    term_lowers.iter().any(|t| lower.contains(t))
+                }
+            };
+            if !matched {
+                continue;
+            }
+
+            total += 1;
+            if snippets.len() >= MAX_SNIPPETS_PER_CHAPTER {
+                continue;
+            }
+
+            let trimmed = line.trim();
+            let snippet: String = if trimmed.chars().count() > MAX_SNIPPET_CHARS {
+                format!("{}…", trimmed.chars().take(MAX_SNIPPET_CHARS).collect::<String>())
+            } else {
+                trimmed.to_string()
+            };
+            snippets.push(format!("  第{}行: {}", idx + 1, snippet));
+        }
+
+        if total > 0 || title_matched {
+            total_all += total;
+            hits.push(Hit {
+                chapter_id: id,
+                title,
+                order,
+                total,
+                snippets,
+                title_matched,
+            });
+        }
+    }
+
+    if hits.is_empty() {
+        return Ok(if chapter_id.is_some() {
+            format!("在指定章节中未找到「{}」", raw_keyword)
+        } else {
+            format!("全书未找到「{}」", raw_keyword)
+        });
+    }
+
+    // 排序：标题命中优先，其次命中次数多的，同分按章节顺序
+    hits.sort_by(|a, b| {
+        b.title_matched
+            .cmp(&a.title_matched)
+            .then(b.total.cmp(&a.total))
+            .then(a.order.cmp(&b.order))
+    });
+
+    let mut out = String::new();
+    if terms.len() > 1 {
+        let others: Vec<&str> = terms.iter().skip(1).map(|s| s.as_str()).collect();
+        out.push_str(&format!("已按角色别名扩展搜索：{}\n", others.join("、")));
+    }
+
+    out.push_str(&format!(
+        "{}「{}」共 {} 处（命中 {} 章）\n",
+        if chapter_id.is_some() { "指定章节中" } else { "全书" },
+        raw_keyword,
+        total_all,
+        hits.len()
+    ));
+
+    let mut shown_chapters = 0usize;
+    let mut shown_snippets = 0usize;
+
+    for hit in &hits {
+        if shown_chapters >= MAX_CHAPTERS || shown_snippets >= MAX_TOTAL_SNIPPETS {
+            break;
+        }
+
+        out.push_str(&format!(
+            "「{}」(ID: {}) 共 {} 处\n",
+            hit.title, hit.chapter_id, hit.total
+        ));
+
+        for snippet in &hit.snippets {
+            if shown_snippets >= MAX_TOTAL_SNIPPETS {
+                break;
+            }
+            out.push_str(snippet);
+            out.push('\n');
+            shown_snippets += 1;
+        }
+
+        shown_chapters += 1;
+    }
+
+    if total_all > shown_snippets || hits.len() > shown_chapters {
+        out.push_str(&format!(
+            "（结果已截断，仅展示前 {} 章 / {} 处；可用更具体的关键词，或指定 chapterId 精确查询）\n",
+            shown_chapters, shown_snippets
+        ));
+    }
+
+    Ok(out.trim_end().to_string())
 }

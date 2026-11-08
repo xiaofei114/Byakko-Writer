@@ -2,31 +2,110 @@ use crate::db::get_pool;
 use crate::models::{Book, BookListItem, Chapter, Volume};
 
 /// 创建书籍
-pub async fn create_book(title: String) -> anyhow::Result<Book> {
+///
+/// 创建时一并建好「第一卷」和「第一章」，保证新书可以直接开始写作。
+/// 所有写入在同一个事务中完成，避免出现只有书没有卷的半成品。
+pub async fn create_book(
+    title: String,
+    author: String,
+    description: String,
+) -> anyhow::Result<Book> {
     let pool = get_pool().await?;
     let now = chrono::Local::now().timestamp_millis();
     let book_id = format!("book_{}", now);
-    
+    let volume_id = format!("volume_{}_first", now);
+    let chapter_id = format!("chapter_{}_first", now);
+
+    let mut tx = pool.begin().await?;
+
     sqlx::query(
         r#"
-        INSERT INTO books (id, title, author, description, created_at, updated_at)
-        VALUES (?1, ?2, '', '', ?3, ?3)
+        INSERT INTO books (id, title, author, description, current_chapter_id, created_at, updated_at)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
         "#
     )
     .bind(&book_id)
     .bind(&title)
+    .bind(&author)
+    .bind(&description)
+    .bind(&chapter_id)
     .bind(now)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
-    
+
+    sqlx::query(
+        r#"
+        INSERT INTO volumes (id, book_id, title, "order", is_collapsed, created_at, updated_at)
+        VALUES (?1, ?2, ?3, 0, 0, ?4, ?4)
+        "#
+    )
+    .bind(&volume_id)
+    .bind(&book_id)
+    .bind("第一卷")
+    .bind(now)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO chapters (id, book_id, volume_id, title, "order", content, word_count, created_at, updated_at)
+        VALUES (?1, ?2, ?3, ?4, 0, '', 0, ?5, ?5)
+        "#
+    )
+    .bind(&chapter_id)
+    .bind(&book_id)
+    .bind(&volume_id)
+    .bind("第一章")
+    .bind(now)
+    .execute(&mut *tx)
+    .await?;
+
+    // 与前端 createChapter 保持一致：为新章节预置粗纲/细纲空记录
+    for outline_type in ["coarse", "fine"] {
+        sqlx::query(
+            r#"
+            INSERT OR IGNORE INTO outlines (id, book_id, volume_id, chapter_id, outline_type, content, created_at, updated_at)
+            VALUES (?1, ?2, NULL, ?3, ?4, '', ?5, ?5)
+            "#
+        )
+        .bind(format!("outline_{}_{}", outline_type, now))
+        .bind(&book_id)
+        .bind(&chapter_id)
+        .bind(outline_type)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+
+    let volume = Volume {
+        id: volume_id,
+        title: "第一卷".to_string(),
+        order: 0,
+        is_collapsed: false,
+        created_at: now,
+        updated_at: now,
+    };
+    let chapter = Chapter {
+        id: chapter_id.clone(),
+        title: "第一章".to_string(),
+        order: 0,
+        volume_id: volume.id.clone(),
+        content: String::new(),
+        word_count: 0,
+        created_at: now,
+        updated_at: now,
+    };
+
     Ok(Book {
         id: book_id,
         title,
-        author: String::new(),
-        description: String::new(),
-        volumes: vec![],
-        chapters: vec![],
-        current_chapter_id: None,
+        author,
+        description,
+        volumes: vec![volume],
+        chapters: vec![chapter],
+        current_chapter_id: Some(chapter_id),
         created_at: now,
         updated_at: now,
     })
@@ -158,11 +237,17 @@ pub async fn update_book(book_id: String, title: String, author: String, descrip
 pub async fn delete_book(book_id: String) -> anyhow::Result<()> {
     let pool = get_pool().await?;
     
+    // 外键已启用（sqlx 默认 PRAGMA foreign_keys=ON），子表会级联删除
     sqlx::query("DELETE FROM books WHERE id = ?1")
         .bind(&book_id)
         .execute(pool)
         .await?;
-    
+
+    // 章节快照存放在独立数据库文件中，需要一并清理
+    if let Err(e) = crate::services::snapshot_service::delete_book_snapshots(&book_id).await {
+        log::warn!("[Book] 清理书籍快照目录失败 {}: {}", book_id, e);
+    }
+
     Ok(())
 }
 
@@ -206,15 +291,27 @@ pub async fn create_volume(book_id: String, title: String) -> anyhow::Result<Vol
     })
 }
 
-/// 删除卷
-pub async fn delete_volume(volume_id: String) -> anyhow::Result<()> {
+/// 删除卷（该卷下的章节会被级联删除，快照一并清理）
+pub async fn delete_volume(book_id: String, volume_id: String) -> anyhow::Result<()> {
     let pool = get_pool().await?;
-    
-    sqlx::query("DELETE FROM volumes WHERE id = ?1")
+
+    let chapter_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM chapters WHERE volume_id = ?1"
+    )
+    .bind(&volume_id)
+    .fetch_all(pool)
+    .await?;
+
+    sqlx::query("DELETE FROM volumes WHERE id = ?1 AND book_id = ?2")
         .bind(&volume_id)
+        .bind(&book_id)
         .execute(pool)
         .await?;
-    
+
+    if let Err(e) = crate::services::snapshot_service::delete_snapshots_for_chapters(&book_id, &chapter_ids).await {
+        log::warn!("[Book] 清理卷内章节快照失败 {}: {}", volume_id, e);
+    }
+
     Ok(())
 }
 
@@ -322,15 +419,21 @@ pub async fn create_chapter_with_order(
     })
 }
 
-/// 删除章节
-pub async fn delete_chapter(chapter_id: String) -> anyhow::Result<()> {
+/// 删除章节（级联删除摘要/大纲/消息引用，并清理该章快照）
+pub async fn delete_chapter(book_id: String, chapter_id: String) -> anyhow::Result<()> {
     let pool = get_pool().await?;
-    
-    sqlx::query("DELETE FROM chapters WHERE id = ?1")
+
+    sqlx::query("DELETE FROM chapters WHERE id = ?1 AND book_id = ?2")
         .bind(&chapter_id)
+        .bind(&book_id)
         .execute(pool)
         .await?;
-    
+
+    let ids = vec![chapter_id.clone()];
+    if let Err(e) = crate::services::snapshot_service::delete_snapshots_for_chapters(&book_id, &ids).await {
+        log::warn!("[Book] 清理章节快照失败 {}: {}", chapter_id, e);
+    }
+
     Ok(())
 }
 
@@ -368,7 +471,14 @@ pub async fn save_chapter_content(
     .bind(&chapter_id)
     .execute(pool)
     .await?;
-    
+
+    // 保存后调度自动摘要（防抖 20 秒，内容过短/已有摘要会跳过）
+    crate::services::summary_generator_service::schedule_auto_summary(chapter_id.clone());
+    // 账本随改稿更新（防抖 30 秒；未启用账本的书会跳过）
+    crate::services::canon_service::schedule_reextract(chapter_id.clone());
+    // 本章改稿后，关联的未解决冲突标记为「待复核」
+    crate::services::conflict_service::mark_chapter_conflicts_for_review(&chapter_id).await;
+
     Ok(())
 }
 

@@ -1,31 +1,25 @@
 <script setup lang="ts">
-import { ref, nextTick, onMounted, onUnmounted, watch } from 'vue';
+import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { useBookStore } from '../stores/book';
 import { useConfigStore } from '../stores/config';
 import { sendChatMessageStream, sendPolishRequest, getChatSessions, deleteChatSession, getChatHistory, updateMessagePolishHandled, updateLineEditHandledStatus } from '../api/aiChat';
-import type { AIChatMessage, ChatSession, AgentPhaseEvent } from '../types';
+import type { AIChatMessage, ChatSession, AgentPhaseEvent, EditProposal, OutlineProposal } from '../types';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { listen } from '@tauri-apps/api/event';
-import { marked } from 'marked';
+import { renderMarkdown as renderMarkdownSafe } from '../utils/markdown';
 import { TOOL_DISPLAY_NAMES } from '../config/appConfig';
 import { showError, showSimpleError } from '../utils/errorHandler';
-import { Delete, Close, UserFilled, Cpu, Promotion, Plus, ArrowDown, Check, Close as CloseIcon, QuestionFilled } from '@element-plus/icons-vue';
+import { Delete, Close, UserFilled, Cpu, Promotion, Plus, ArrowDown, ArrowUp, Check, Loading, Close as CloseIcon, QuestionFilled, Document } from '@element-plus/icons-vue';
 import { ElMessage, ElMessageBox, ElNotification } from 'element-plus';
 import { getPolishRequest, clearPolishRequest } from '../utils/eventBus';
 
-// 配置 marked
-marked.setOptions({
-  breaks: true,
-  gfm: true
-});
-
-// 渲染 Markdown
+// 渲染 Markdown（已做 HTML 白名单清洗）
 const renderMarkdown = (content: string) => {
   if (!content) return '';
   // 过滤掉工具调用标记
   const cleanedContent = filterToolCalls(content);
-  return marked.parse(cleanedContent);
+  return renderMarkdownSafe(cleanedContent);
 };
 
 // 过滤润色提示词
@@ -103,11 +97,97 @@ const currentToolCallMsgId = ref<string>(''); // 当前轮次工具消息的ID
 // ask_user 输入
 const askUserInput = ref(''); // 用户输入的答复
 const otherOptionActive = ref(''); // 当前激活"其他"选项的消息ID
+// 输入框上方的待回答面板
+const askDockExpanded = ref(true);
+const askDockOtherId = ref('');
+const thinkingCollapsed = ref<Record<string, boolean>>({});
+const thinkingStreaming = ref<Record<string, boolean>>({});
+// block（plan / round-N）→ 消息 id，支持一轮对话里多个思考块
+const thinkingBlockIds = ref<Record<string, string>>({});
+// block → 标签（start 时记录，避免只有阶段事件时创建空块）
+const thinkingLabels = ref<Record<string, string>>({});
+
+// 还没回答的 ask_user 消息（最多显示全部，按时间先后）
+const pendingAskMessages = computed(() =>
+  messages.value.filter(m => m.role === 'ask_user' && !isAskUserHandled(m))
+);
+
+// 有新问题自动展开面板
+watch(() => pendingAskMessages.value.length, (len) => {
+  if (len > 0) askDockExpanded.value = true;
+});
+
+// 切换输入框上方「其他」输入
+const toggleAskDockOther = (msg: AIChatMessage) => {
+  if (askDockOtherId.value === msg.id) {
+    askDockOtherId.value = '';
+    askUserInput.value = '';
+  } else {
+    askDockOtherId.value = msg.id;
+    askUserInput.value = '';
+  }
+};
+
+// 折叠/展开思考过程
+const toggleThinking = (messageId: string) => {
+  thinkingCollapsed.value = {
+    ...thinkingCollapsed.value,
+    [messageId]: !thinkingCollapsed.value[messageId],
+  };
+};
+
+// 确保某个思考块（计划/第 N 轮反思）有对应消息
+const ensureThinkingMessage = (
+  bookId: string,
+  sessionId: string,
+  block: string,
+  label: string
+): AIChatMessage => {
+  const existingId = thinkingBlockIds.value[block];
+  if (existingId) {
+    const existing = messages.value.find(msg => msg.id === existingId);
+    if (existing) return existing;
+  }
+
+  const thinkingMsg: AIChatMessage = {
+    id: 'think_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+    bookId,
+    sessionId,
+    role: 'thinking',
+    content: '',
+    timestamp: Date.now(),
+    thinkingLabel: label,
+  };
+
+  thinkingBlockIds.value = { ...thinkingBlockIds.value, [block]: thinkingMsg.id };
+  thinkingStreaming.value = { ...thinkingStreaming.value, [thinkingMsg.id]: true };
+
+  const lastMsg = messages.value[messages.value.length - 1];
+  if (lastMsg && lastMsg.role === 'assistant' && !lastMsg.content.trim()) {
+    messages.value.splice(messages.value.length - 1, 0, thinkingMsg);
+  } else {
+    messages.value.push(thinkingMsg);
+  }
+
+  return thinkingMsg;
+};
+
+// 思考卡片标题（保证永远有文字，避免出现只有边框的空块）
+const thinkingTitle = (msg: AIChatMessage): string => {
+  const label = msg.thinkingLabel || '思考过程';
+  if (thinkingStreaming.value[msg.id]) return label + '中…';
+  return label + ' · ' + (msg.content ? msg.content.length : 0) + ' 字';
+};
 
 
 
 // 跟踪每个消息中已保存的大纲类型 (messageId -> Set<outlineType>)
 const savedOutlines = ref<Map<string, Set<string>>>(new Map());
+
+// ==================== 批量编辑提案 ====================
+// 每条提案消息里各条修改的勾选状态（默认勾选“可定位”的条目）
+const editSelection = ref<Record<string, boolean[]>>({});
+const outlineSelection = ref<Record<string, boolean[]>>({});
 
 // 打字机效果相关
 const typewriterBuffer = ref(''); // 待显示的字符缓冲区
@@ -180,6 +260,14 @@ const stopTypewriter = () => {
   }
 };
 
+// 移除末尾的空 AI 气泡（占位消息在某些流程里不会被填充）
+const removeTrailingEmptyAssistant = () => {
+  const lastMsg = messages.value[messages.value.length - 1];
+  if (lastMsg && lastMsg.role === 'assistant' && !lastMsg.content.trim()) {
+    messages.value.pop();
+  }
+};
+
 const scrollToBottom = async () => {
   await nextTick();
   if (messagesContainer.value) {
@@ -217,6 +305,19 @@ const loadSessionMessages = async (sessionId: string) => {
   try {
     const history = await getChatHistory(sessionId, 50);
     messages.value = history;
+    // 历史里的思考消息：从内容前缀恢复「第 N 轮反思」标签
+    history.forEach((msg) => {
+      if (msg.role === 'thinking') {
+        const match = msg.content.match(/^第(\d+)轮反思\n/);
+        if (match) {
+          msg.thinkingLabel = `第${match[1]}轮反思`;
+          msg.content = msg.content.slice(match[0].length);
+        } else {
+          msg.thinkingLabel = '思考';
+        }
+      }
+      initProposalSelections(msg);
+    });
     // 标记为历史消息（不显示操作按钮）
     historyMessageIds.value = new Set(history.map(m => m.id));
     // 恢复大纲保存状态（内存态在刷新后丢失，需从数据库恢复）
@@ -298,6 +399,9 @@ const handleSend = async () => {
   isLoading.value = true;
   isStreaming.value = true;
 
+  // 新一轮思考从新的消息开始
+  thinkingBlockIds.value = {};
+
   // 添加一个空的 AI 消息用于流式填充
   const aiMsgId = (Date.now() + 1).toString();
   const aiMsg: AIChatMessage = {
@@ -336,6 +440,7 @@ const handleSend = async () => {
         sessionId: currentSessionId.value,
         bookId: bookStore.currentBook.id,
         chapterId: bookStore.currentChapterId || undefined,
+        outlineTarget: bookStore.outlineContext || undefined,
         message: userMessage,
         config: configStore.aiConfig
       },
@@ -345,8 +450,9 @@ const handleSend = async () => {
           if (isInToolCallRound.value) {
             isInToolCallRound.value = false;
 
-            // 为 AI 的回复创建新的消息气泡
+            // 为 AI 的回复创建新的消息气泡（先清掉可能残留的空占位）
             currentStreamContent.value = '';
+            removeTrailingEmptyAssistant();
             const newMessage: AIChatMessage = {
               id: 'ai_' + Date.now(),
               bookId: bookStore.currentBook?.id || '',
@@ -436,6 +542,10 @@ const handleSend = async () => {
           currentToolCallMsgId.value = '';
           // 对话完成，加速显示剩余内容
           speedUpTypewriter();
+          // 本轮没有任何文字输出（只调了工具/只停了提问）：清掉空占位气泡
+          if (typewriterBuffer.value.length === 0) {
+            removeTrailingEmptyAssistant();
+          }
           // 清理监听器
           if (streamUnlisten.value) {
             streamUnlisten.value();
@@ -644,6 +754,11 @@ const applyWrite = async (msg: AIChatMessage) => {
   const data = parseWriteMsg(msg);
   if (!data || !bookStore.currentBook) return;
 
+  if (!data.chapterId) {
+    ElMessage.error('缺少章节ID，无法插入内容');
+    return;
+  }
+
   const mode = writeInsertMode.value[msg.id] || 'append';
 
   // 清理内容：去首尾空行，合并连续空行
@@ -814,6 +929,12 @@ const buildToolDisplayText = (toolName: string, displayName: string, params?: Re
       const lineNum = params?.lineNumber ? `第${params.lineNumber}行` : '';
       return `提议修改${chTitle}${lineNum}`;
     }
+    case 'propose_edits': {
+      const chTitle = params?.chapterId ? findChapterTitle(params.chapterId) : '章节';
+      return `提交${chTitle}修改提案`;
+    }
+    case 'propose_outlines':
+      return '提交大纲修改提案';
     case 'ask_user':
       return params?.question ? `询问：${params.question}` : baseName;
     case 'get_character_timeline':
@@ -915,6 +1036,223 @@ const isLineEditHandled = (msg: AIChatMessage): boolean => {
   }
 };
 
+// ==================== 批量编辑提案 ====================
+
+const parseEditProposal = (msg: AIChatMessage): EditProposal | null => {
+  try {
+    const data = JSON.parse(msg.content);
+    return data && data.proposalId ? data : null;
+  } catch {
+    return null;
+  }
+};
+
+const parseOutlineProposal = (msg: AIChatMessage): OutlineProposal | null => {
+  try {
+    const data = JSON.parse(msg.content);
+    return data && data.proposalId ? data : null;
+  } catch {
+    return null;
+  }
+};
+
+const proposalStatus = (msg: AIChatMessage): 'pending' | 'applied' | 'rejected' => {
+  // 历史消息从数据库的 handled_status 恢复处理状态
+  if (msg.handledStatus === 'accepted') return 'applied';
+  if (msg.handledStatus === 'rejected') return 'rejected';
+
+  const data = msg.role === 'edit_proposal' ? parseEditProposal(msg) : parseOutlineProposal(msg);
+  return (data?.status as 'pending' | 'applied' | 'rejected') || 'pending';
+};
+
+// 新提案到达 / 加载历史时初始化勾选状态
+const initProposalSelections = (msg: AIChatMessage) => {
+  if (msg.role === 'edit_proposal') {
+    const proposal = parseEditProposal(msg);
+    if (proposal && !editSelection.value[msg.id]) {
+      editSelection.value[msg.id] = proposal.edits.map(edit => edit.matched);
+    }
+  } else if (msg.role === 'outline_proposal') {
+    const proposal = parseOutlineProposal(msg);
+    if (proposal && !outlineSelection.value[msg.id]) {
+      outlineSelection.value[msg.id] = proposal.outlines.map(() => true);
+    }
+  }
+};
+
+const editSelectedCount = (msg: AIChatMessage): number => {
+  return (editSelection.value[msg.id] || []).filter(Boolean).length;
+};
+
+const outlineSelectedCount = (msg: AIChatMessage): number => {
+  return (outlineSelection.value[msg.id] || []).filter(Boolean).length;
+};
+
+const toggleEditSelection = (msg: AIChatMessage, index: number, value: boolean) => {
+  const current = [...(editSelection.value[msg.id] || [])];
+  current[index] = value;
+  editSelection.value[msg.id] = current;
+};
+
+const toggleOutlineSelection = (msg: AIChatMessage, index: number, value: boolean) => {
+  const current = [...(outlineSelection.value[msg.id] || [])];
+  current[index] = value;
+  outlineSelection.value[msg.id] = current;
+};
+
+const toggleAllEdits = (msg: AIChatMessage, value: boolean) => {
+  const proposal = parseEditProposal(msg);
+  if (!proposal) return;
+  editSelection.value[msg.id] = proposal.edits.map(edit => (value ? edit.matched : false));
+};
+
+const toggleAllOutlines = (msg: AIChatMessage, value: boolean) => {
+  const proposal = parseOutlineProposal(msg);
+  if (!proposal) return;
+  outlineSelection.value[msg.id] = proposal.outlines.map(() => value);
+};
+
+const focusProposalChapter = async (msg: AIChatMessage) => {
+  const proposal = parseEditProposal(msg);
+  if (!proposal) return;
+  if (bookStore.currentChapterId !== proposal.chapterId) {
+    await bookStore.selectChapter(proposal.chapterId);
+  }
+};
+
+// 一次性应用勾选的正文修改
+const applyEditProposal = async (msg: AIChatMessage) => {
+  const proposal = parseEditProposal(msg);
+  if (!proposal || !bookStore.currentBook) return;
+
+  const selected = editSelection.value[msg.id] || [];
+  const edits = proposal.edits
+    .filter((_, index) => selected[index])
+    .map(edit => ({
+      lineNumber: edit.lineNumber || null,
+      originalText: edit.originalText,
+      newText: edit.newText,
+      reason: edit.reason || '',
+    }));
+
+  const useReplaceAll = !!proposal.replaceAll;
+  if (!useReplaceAll && edits.length === 0) {
+    ElMessage.warning('请至少勾选一处修改');
+    return;
+  }
+
+  try {
+    const result = await invoke<{ applied: number; failed: number; new_content: string }>('apply_edit_proposal', {
+      bookId: bookStore.currentBook.id,
+      chapterId: proposal.chapterId,
+      edits,
+      replaceAll: useReplaceAll ? proposal.content : null,
+    });
+
+    msg.content = JSON.stringify({ ...proposal, status: 'applied' });
+    try {
+      await updateLineEditHandledStatus(msg.id, 'accepted');
+    } catch (e) {
+      console.error('保存提案处理状态失败:', e);
+    }
+
+    // 更新本地缓存，避免切到该章时看到旧内容
+    bookStore.chapterContents.set(proposal.chapterId, result.new_content);
+
+    // 当前正开着这一章时刷新编辑器
+    if (bookStore.currentChapterId === proposal.chapterId) {
+      window.dispatchEvent(new CustomEvent('chapter-content-changed', {
+        detail: { chapterId: proposal.chapterId }
+      }));
+    }
+
+    if (result.failed > 0) {
+      ElMessage.warning(`已应用 ${result.applied} 处，${result.failed} 处未定位（可在编辑器里手动处理）`);
+    } else {
+      ElMessage.success(`已应用 ${result.applied} 处修改${useReplaceAll ? '（整章替换）' : ''}，修改前已自动创建快照`);
+    }
+  } catch (error) {
+    showSimpleError(error);
+  }
+};
+
+const rejectEditProposal = async (msg: AIChatMessage) => {
+  const proposal = parseEditProposal(msg);
+  if (!proposal) return;
+  msg.content = JSON.stringify({ ...proposal, status: 'rejected' });
+  try {
+    await updateLineEditHandledStatus(msg.id, 'rejected');
+  } catch (e) {
+    console.error('保存提案处理状态失败:', e);
+  }
+  ElMessage.info('已拒绝本次修改');
+};
+
+// 一次性保存勾选的大纲
+const applyOutlineProposal = async (msg: AIChatMessage) => {
+  const proposal = parseOutlineProposal(msg);
+  if (!proposal || !bookStore.currentBook) return;
+
+  const selected = outlineSelection.value[msg.id] || [];
+  const outlines = proposal.outlines
+    .filter((_, index) => selected[index])
+    .map(item => ({
+      level: item.level,
+      volumeId: item.volumeId || null,
+      chapterId: item.chapterId || null,
+      outlineType: item.outlineType,
+      content: item.content,
+    }));
+
+  if (outlines.length === 0) {
+    ElMessage.warning('请至少勾选一项大纲');
+    return;
+  }
+
+  try {
+    const result = await invoke<{ saved: number; failures: string[] }>('apply_outline_proposal', {
+      bookId: bookStore.currentBook.id,
+      outlines,
+    });
+
+    msg.content = JSON.stringify({ ...proposal, status: 'applied' });
+    try {
+      await updateLineEditHandledStatus(msg.id, 'accepted');
+    } catch (e) {
+      console.error('保存提案处理状态失败:', e);
+    }
+
+    // 通知大纲编辑器刷新
+    for (const item of outlines) {
+      if (item.chapterId) {
+        window.dispatchEvent(new CustomEvent('outline-saved', {
+          detail: { chapterId: item.chapterId, outlineType: item.outlineType }
+        }));
+      }
+    }
+
+    if (result.failures?.length) {
+      ElMessage.warning(`已保存 ${result.saved} 项，${result.failures.length} 项失败`);
+    } else {
+      ElMessage.success(`已保存 ${result.saved} 项大纲`);
+    }
+  } catch (error) {
+    showSimpleError(error);
+  }
+};
+
+const rejectOutlineProposal = async (msg: AIChatMessage) => {
+  const proposal = parseOutlineProposal(msg);
+  if (!proposal) return;
+  msg.content = JSON.stringify({ ...proposal, status: 'rejected' });
+  try {
+    await updateLineEditHandledStatus(msg.id, 'rejected');
+  } catch (e) {
+    console.error('保存提案处理状态失败:', e);
+  }
+  ElMessage.info('已取消本次大纲修改');
+};
+
 // 检查 ask_user 是否已处理
 const isAskUserHandled = (msg: AIChatMessage): boolean => {
   if (msg.handledStatus === 'handled') return true;
@@ -956,6 +1294,7 @@ const handleAskUserSelect = async (msg: AIChatMessage, option: string) => {
   // 标记为已处理
   msg.content = JSON.stringify({ ...data, handled: true, selectedOption: option });
   msg.handledStatus = 'handled';
+  askDockOtherId.value = '';
 
   // 持久化处理状态
   try {
@@ -967,6 +1306,10 @@ const handleAskUserSelect = async (msg: AIChatMessage, option: string) => {
   // 通过 handleSend 流程发送答复，确保流式监听器被正确管理
   isLoading.value = false;
   isStreaming.value = false;
+  // ask_user 暂停时后端不会补发完成事件，这里手动清理工具轮状态
+  isInToolCallRound.value = false;
+  currentToolCallNames.value = [];
+  currentToolCallMsgId.value = '';
   inputMessage.value = `我选择：${option}`;
   await handleSend();
 };
@@ -998,6 +1341,7 @@ const handleAskUserInput = async (msg: AIChatMessage) => {
   // 清空输入
   askUserInput.value = '';
   otherOptionActive.value = '';
+  askDockOtherId.value = '';
 
   // 持久化处理状态
   try {
@@ -1009,6 +1353,9 @@ const handleAskUserInput = async (msg: AIChatMessage) => {
   // 通过 handleSend 流程发送答复
   isLoading.value = false;
   isStreaming.value = false;
+  isInToolCallRound.value = false;
+  currentToolCallNames.value = [];
+  currentToolCallMsgId.value = '';
   inputMessage.value = input;
   await handleSend();
 };
@@ -1023,6 +1370,9 @@ let writeDoneUnlisten: (() => void) | null = null;
 let lineEditResultUnlisten: (() => void) | null = null;
 let askUserResultUnlisten: (() => void) | null = null;
 let fixConflictUnlisten: (() => void) | null = null;
+let editProposalUnlisten: (() => void) | null = null;
+let outlineProposalUnlisten: (() => void) | null = null;
+let thinkingUnlisten: (() => void) | null = null;
 
 onMounted(async () => {
   loadSessions();
@@ -1040,7 +1390,8 @@ onMounted(async () => {
     // 只处理当前会话的结果（新会话时 currentSessionId 尚为 undefined，也接受）
     if (currentSessionId.value && data.sessionId !== currentSessionId.value) return;
 
-    // 在聊天中插入大纲卡片消息
+    // 在聊天中插入大纲卡片消息（先清掉可能残留的空占位）
+    removeTrailingEmptyAssistant();
     const outlineMsg: AIChatMessage = {
       id: 'outline_' + Date.now(),
       bookId: data.bookId,
@@ -1063,6 +1414,7 @@ onMounted(async () => {
   writeResultUnlisten = await listen('ai-write-start', (event) => {
     const data = event.payload as { sessionId: string; bookId: string; chapterId: string; description: string };
     if (currentSessionId.value && data.sessionId !== currentSessionId.value) return;
+    removeTrailingEmptyAssistant();
     const writeMsg: AIChatMessage = {
       id: 'write_' + Date.now(),
       bookId: data.bookId,
@@ -1072,7 +1424,9 @@ onMounted(async () => {
       timestamp: Date.now(),
     };
     currentWriteMsgId = writeMsg.id;
-    writeInsertMode.value[writeMsg.id] = 'append';
+    // 描述里出现“重写/替换”时默认替换全文，否则默认续写
+    writeInsertMode.value[writeMsg.id] =
+      data.description.includes('重写') || data.description.includes('替换') ? 'replace' : 'append';
     messages.value.push(writeMsg);
     scrollToBottom();
   });
@@ -1104,6 +1458,7 @@ onMounted(async () => {
       }
     } else {
       // 非流式到达（直接完成），创建新卡片
+      removeTrailingEmptyAssistant();
       const writeMsg: AIChatMessage = {
         id: 'write_' + Date.now(),
         bookId: data.bookId,
@@ -1112,7 +1467,8 @@ onMounted(async () => {
         content: JSON.stringify({ chapterId: data.chapterId, content: data.content, description: data.description }),
         timestamp: Date.now(),
       };
-      writeInsertMode.value[writeMsg.id] = 'append';
+      writeInsertMode.value[writeMsg.id] =
+        data.description.includes('重写') || data.description.includes('替换') ? 'replace' : 'append';
       messages.value.push(writeMsg);
     }
     currentWriteMsgId = null;
@@ -1131,6 +1487,7 @@ onMounted(async () => {
     };
     if (data.sessionId !== currentSessionId.value) return;
 
+    removeTrailingEmptyAssistant();
     const conflictMsg: AIChatMessage = {
       id: 'conflict_' + Date.now(),
       bookId: data.bookId,
@@ -1162,6 +1519,7 @@ onMounted(async () => {
     };
     if (data.sessionId !== currentSessionId.value) return;
 
+    removeTrailingEmptyAssistant();
     const lineEditMsg: AIChatMessage = {
       id: data.messageId,
       bookId: data.bookId,
@@ -1194,6 +1552,7 @@ onMounted(async () => {
     };
     if (data.sessionId !== currentSessionId.value) return;
 
+    removeTrailingEmptyAssistant();
     const askUserMsg: AIChatMessage = {
       id: data.messageId,
       bookId: data.bookId,
@@ -1209,6 +1568,118 @@ onMounted(async () => {
       timestamp: Date.now(),
     };
     messages.value.push(askUserMsg);
+    scrollToBottom();
+  });
+
+  // 监听思考过程（思考模式流式输出：计划 + 每轮反思）
+  thinkingUnlisten = await listen('ai-thinking', (event) => {
+    const data = event.payload as {
+      sessionId: string;
+      bookId: string;
+      content?: string;
+      phase?: 'start' | 'chunk' | 'done';
+      block?: string;
+      label?: string;
+    };
+    if (currentSessionId.value && data.sessionId !== currentSessionId.value) return;
+
+    const block = data.block || 'plan';
+    const label = data.label || thinkingLabels.value[block] || '思考';
+
+    // start 只记录标签，不创建空消息；等真正有内容再显示
+    if (data.phase === 'start') {
+      thinkingLabels.value = { ...thinkingLabels.value, [block]: label };
+      return;
+    }
+
+    if (data.phase === 'chunk' && !data.content) return;
+
+    // done 且没有内容、之前也没创建过：不显示空块
+    const doneWithoutContent =
+      (data.phase === 'done' || !data.phase) && (!data.content || !data.content.trim());
+    if (doneWithoutContent && !thinkingBlockIds.value[block]) return;
+
+    const thinkingMsg = ensureThinkingMessage(data.bookId, data.sessionId, block, label);
+
+    if (data.phase === 'chunk') {
+      thinkingMsg.content += data.content;
+      scrollToBottom();
+      // 思考内容自己也要跟着滚动到底部
+      nextTick(() => {
+        const elm = document.querySelector(
+          `.thinking-block[data-thinking-id="${thinkingMsg.id}"] .thinking-content`
+        ) as HTMLElement | null;
+        if (elm) elm.scrollTop = elm.scrollHeight;
+      });
+      return;
+    }
+
+    if (data.phase === 'done' || !data.phase) {
+      thinkingStreaming.value = { ...thinkingStreaming.value, [thinkingMsg.id]: false };
+
+      // 用最终文本纠正一次，避免漏掉最后一个分片
+      if (data.content && data.content.trim()) {
+        thinkingMsg.content = data.content;
+      }
+
+      if (!thinkingMsg.content.trim()) {
+        const index = messages.value.findIndex(msg => msg.id === thinkingMsg.id);
+        if (index >= 0) messages.value.splice(index, 1);
+        const nextBlockIds = { ...thinkingBlockIds.value };
+        delete nextBlockIds[block];
+        thinkingBlockIds.value = nextBlockIds;
+      }
+
+      scrollToBottom();
+    }
+  });
+
+  // 监听批量修改提案（来自 function calling 的 propose_edits 拦截）
+  editProposalUnlisten = await listen('ai-edit-proposal', (event) => {
+    const data = event.payload as {
+      sessionId: string;
+      bookId: string;
+      messageId: string;
+      proposal: EditProposal;
+    };
+    if (currentSessionId.value && data.sessionId !== currentSessionId.value) return;
+
+    removeTrailingEmptyAssistant();
+    const proposalMsg: AIChatMessage = {
+      id: data.messageId,
+      bookId: data.bookId,
+      chapterId: data.proposal.chapterId,
+      sessionId: data.sessionId,
+      role: 'edit_proposal',
+      content: JSON.stringify(data.proposal),
+      timestamp: Date.now(),
+    };
+    messages.value.push(proposalMsg);
+    initProposalSelections(proposalMsg);
+    scrollToBottom();
+  });
+
+  // 监听批量大纲提案（来自 function calling 的 propose_outlines 拦截）
+  outlineProposalUnlisten = await listen('ai-outline-proposal', (event) => {
+    const data = event.payload as {
+      sessionId: string;
+      bookId: string;
+      messageId: string;
+      proposal: OutlineProposal;
+    };
+    if (currentSessionId.value && data.sessionId !== currentSessionId.value) return;
+
+    removeTrailingEmptyAssistant();
+    const proposalMsg: AIChatMessage = {
+      id: data.messageId,
+      bookId: data.bookId,
+      sessionId: data.sessionId,
+      role: 'outline_proposal',
+      content: JSON.stringify(data.proposal),
+      timestamp: Date.now(),
+    };
+    messages.value.push(proposalMsg);
+    initProposalSelections(proposalMsg);
     scrollToBottom();
   });
 
@@ -1254,6 +1725,15 @@ onUnmounted(() => {
   }
   if (fixConflictUnlisten) {
     fixConflictUnlisten();
+  }
+  if (editProposalUnlisten) {
+    editProposalUnlisten();
+  }
+  if (outlineProposalUnlisten) {
+    outlineProposalUnlisten();
+  }
+  if (thinkingUnlisten) {
+    thinkingUnlisten();
   }
   polishUnwatch();
 });
@@ -1359,6 +1839,24 @@ onUnmounted(() => {
               {{ item }}
             </div>
           </div>
+          <!-- 思考过程（思考模式产出的内部计划） -->
+          <div v-else-if="msg.role === 'thinking'" class="thinking-block" :data-thinking-id="msg.id">
+            <div class="thinking-header" @click="toggleThinking(msg.id)">
+              <span class="thinking-title">
+                <el-icon v-if="thinkingStreaming[msg.id]" class="thinking-spinner"><Loading /></el-icon>
+                {{ thinkingTitle(msg) }}
+              </span>
+              <el-icon class="thinking-toggle">
+                <ArrowDown v-if="!thinkingCollapsed[msg.id]" />
+                <ArrowUp v-else />
+              </el-icon>
+            </div>
+            <div
+              v-show="!thinkingCollapsed[msg.id]"
+              class="thinking-content markdown-body"
+              v-html="renderMarkdown(msg.content || '（暂无内容）')"
+            ></div>
+          </div>
           <!-- 大纲结果消息（来自 function calling 的 save_outline 拦截） -->
           <div v-else-if="msg.role === 'outline' && parseOutlineMsg(msg)" class="outline-result-card">
             <div class="outline-type-header">
@@ -1385,6 +1883,109 @@ onUnmounted(() => {
               </el-button>
             </div>
           </div>
+          <!-- 批量修改提案（来自 function calling 的 propose_edits） -->
+          <div v-else-if="msg.role === 'edit_proposal' && parseEditProposal(msg)" class="proposal-card">
+            <div class="proposal-card-header">
+              <span class="proposal-title">
+                修改建议 · {{ parseEditProposal(msg)!.replaceAll ? '整章替换' : parseEditProposal(msg)!.edits.length + ' 处' }}
+              </span>
+              <span v-if="parseEditProposal(msg)!.summary" class="proposal-summary">{{ parseEditProposal(msg)!.summary }}</span>
+            </div>
+
+            <template v-if="proposalStatus(msg) === 'pending'">
+              <div v-if="parseEditProposal(msg)!.replaceAll" class="proposal-replace-preview">
+                <div class="proposal-hint">将用以下内容替换整章：</div>
+                <pre class="proposal-pre">{{ parseEditProposal(msg)!.content }}</pre>
+              </div>
+
+              <div v-else class="proposal-list">
+                <div
+                  v-for="(edit, idx) in parseEditProposal(msg)!.edits"
+                  :key="idx"
+                  class="proposal-item"
+                  :class="{ 'is-unmatched': !edit.matched }"
+                >
+                  <el-checkbox
+                    :model-value="editSelection[msg.id]?.[idx] || false"
+                    :disabled="!edit.matched"
+                    @change="(value: any) => toggleEditSelection(msg, idx, value === true)"
+                  />
+                  <div class="proposal-item-body">
+                    <div class="proposal-item-meta">
+                      <span>第 {{ edit.lineNumber || '?' }} 行</span>
+                      <span v-if="edit.reason" class="proposal-reason">· {{ edit.reason }}</span>
+                      <span v-if="!edit.matched" class="proposal-unmatched-tip">· 未找到原文，需手动处理</span>
+                    </div>
+                    <div class="proposal-diff">
+                      <div class="diff-before">{{ edit.before || edit.originalText }}</div>
+                      <div class="diff-after">{{ edit.newText }}</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="proposal-actions">
+                <el-button size="small" @click="toggleAllEdits(msg, true)">全选可应用项</el-button>
+                <el-button size="small" :icon="Document" @click="focusProposalChapter(msg)">查看章节</el-button>
+                <el-button
+                  type="primary"
+                  size="small"
+                  :disabled="!parseEditProposal(msg)!.replaceAll && editSelectedCount(msg) === 0"
+                  @click="applyEditProposal(msg)"
+                >
+                  {{ parseEditProposal(msg)!.replaceAll ? '应用整章替换' : `应用选中（${editSelectedCount(msg)}）` }}
+                </el-button>
+                <el-button size="small" class="proposal-reject" @click="rejectEditProposal(msg)">全部拒绝</el-button>
+              </div>
+            </template>
+            <div v-else class="proposal-done">
+              {{ proposalStatus(msg) === 'applied' ? '已应用（修改前快照已保存，可在快照面板撤回）' : '已拒绝' }}
+            </div>
+          </div>
+
+          <!-- 批量大纲提案（来自 function calling 的 propose_outlines） -->
+          <div v-else-if="msg.role === 'outline_proposal' && parseOutlineProposal(msg)" class="proposal-card">
+            <div class="proposal-card-header">
+              <span class="proposal-title">大纲更新 · {{ parseOutlineProposal(msg)!.outlines.length }} 项</span>
+              <span v-if="parseOutlineProposal(msg)!.summary" class="proposal-summary">{{ parseOutlineProposal(msg)!.summary }}</span>
+            </div>
+
+            <template v-if="proposalStatus(msg) === 'pending'">
+              <div class="proposal-list">
+                <div
+                  v-for="(item, idx) in parseOutlineProposal(msg)!.outlines"
+                  :key="idx"
+                  class="proposal-item"
+                >
+                  <el-checkbox
+                    :model-value="outlineSelection[msg.id]?.[idx] ?? true"
+                    @change="(value: any) => toggleOutlineSelection(msg, idx, value === true)"
+                  />
+                  <div class="proposal-item-body">
+                    <div class="proposal-item-meta">{{ item.label }}</div>
+                    <pre class="proposal-pre proposal-pre-scroll">{{ item.content }}</pre>
+                  </div>
+                </div>
+              </div>
+
+              <div class="proposal-actions">
+                <el-button size="small" @click="toggleAllOutlines(msg, true)">全选</el-button>
+                <el-button
+                  type="primary"
+                  size="small"
+                  :disabled="outlineSelectedCount(msg) === 0"
+                  @click="applyOutlineProposal(msg)"
+                >
+                  保存选中（{{ outlineSelectedCount(msg) }}）
+                </el-button>
+                <el-button size="small" class="proposal-reject" @click="rejectOutlineProposal(msg)">全部取消</el-button>
+              </div>
+            </template>
+            <div v-else class="proposal-done">
+              {{ proposalStatus(msg) === 'applied' ? '已保存' : '已取消' }}
+            </div>
+          </div>
+
           <!-- 创作结果消息（来自 function calling 的 write_chapter 拦截） -->
           <div v-else-if="msg.role === 'write' && parseWriteMsg(msg)" class="write-result-card">
             <template v-if="!isWriteApplied(msg)">
@@ -1559,6 +2160,47 @@ onUnmounted(() => {
         </template>
       </template>
       
+    </div>
+
+    <!-- 待回答问题（固定在输入框上方，可连续点选） -->
+    <div v-if="pendingAskMessages.length > 0" class="ask-dock">
+      <div class="ask-dock-header" @click="askDockExpanded = !askDockExpanded">
+        <span class="ask-dock-badge">待回答 {{ pendingAskMessages.length }}</span>
+        <span class="ask-dock-preview">{{ parseAskUserMsg(pendingAskMessages[0])?.question }}</span>
+        <el-icon class="ask-dock-toggle">
+          <ArrowDown v-if="askDockExpanded" />
+          <ArrowUp v-else />
+        </el-icon>
+      </div>
+
+      <div v-show="askDockExpanded" class="ask-dock-body">
+        <div v-for="msg in pendingAskMessages" :key="msg.id" class="ask-dock-item">
+          <div class="ask-dock-question">{{ parseAskUserMsg(msg)?.question }}</div>
+          <div v-if="parseAskUserMsg(msg)?.context" class="ask-dock-context">
+            {{ parseAskUserMsg(msg)?.context }}
+          </div>
+          <div class="ask-dock-options">
+            <el-button
+              v-for="(option, idx) in (parseAskUserMsg(msg)?.options || [])"
+              :key="idx"
+              size="small"
+              @click="handleAskUserSelect(msg, option)"
+            >
+              {{ option }}
+            </el-button>
+            <el-button size="small" plain @click="toggleAskDockOther(msg)">其他…</el-button>
+          </div>
+          <div v-if="askDockOtherId === msg.id" class="ask-dock-other">
+            <el-input
+              v-model="askUserInput"
+              size="small"
+              placeholder="输入你的答复..."
+              @keyup.enter="handleAskUserInput(msg)"
+            />
+            <el-button size="small" type="primary" @click="handleAskUserInput(msg)">发送</el-button>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- 输入区域 -->
@@ -1740,6 +2382,12 @@ onUnmounted(() => {
   flex-direction: column;
   gap: var(--nw-space-md);
   background: var(--nw-bg-page);
+}
+
+/* 消息区是 flex 列：子项必须禁止收缩，否则带 overflow:hidden 的卡片
+   （思考块/提案卡等）会被越挤越矮，内容被裁掉 */
+.messages-container > * {
+  flex-shrink: 0;
 }
 
 /* 欢迎状态 */
@@ -2048,6 +2696,100 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
+/* 输入框上方的待回答问题面板 */
+.ask-dock {
+  flex-shrink: 0;
+  border-top: 1px solid var(--nw-border-light);
+  background: var(--nw-bg-primary);
+  display: flex;
+  flex-direction: column;
+  max-height: 42vh;
+}
+
+.ask-dock-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.ask-dock-header:hover {
+  background: var(--nw-bg-secondary);
+}
+
+.ask-dock-badge {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: #fff;
+  background: var(--nw-primary);
+  border-radius: 10px;
+  padding: 1px 8px;
+}
+
+.ask-dock-preview {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--nw-text-secondary);
+}
+
+.ask-dock-toggle {
+  flex-shrink: 0;
+  color: var(--nw-text-tertiary);
+}
+
+.ask-dock-body {
+  overflow-y: auto;
+  padding: 0 12px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ask-dock-item {
+  border: 1px solid var(--nw-border);
+  border-radius: var(--nw-radius);
+  padding: 8px 10px;
+  background: var(--nw-bg-secondary);
+}
+
+.ask-dock-question {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--nw-text-primary);
+  line-height: 1.5;
+}
+
+.ask-dock-context {
+  font-size: 12px;
+  color: var(--nw-text-secondary);
+  margin-top: 4px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.ask-dock-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.ask-dock-other {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.ask-dock-other .el-input {
+  flex: 1;
+}
+
 .input-wrapper {
   display: flex;
   gap: var(--nw-space-sm);
@@ -2151,6 +2893,59 @@ onUnmounted(() => {
   font-size: 12px;
   color: var(--nw-text-muted);
   padding: 1px 0;
+}
+
+/* 思考过程 */
+.thinking-block {
+  margin: 6px 0;
+  border: 1px solid var(--nw-border);
+  border-left: 3px solid var(--nw-primary);
+  border-radius: var(--nw-radius-sm);
+  background: var(--nw-bg-secondary);
+  overflow: hidden;
+}
+
+.thinking-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.thinking-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: #5a6c7d;
+  letter-spacing: 1px;
+}
+
+.thinking-spinner {
+  animation: thinking-spin 1s linear infinite;
+}
+
+@keyframes thinking-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.thinking-toggle {
+  color: var(--nw-text-tertiary);
+}
+
+.thinking-content {
+  margin: 0;
+  padding: 4px 12px 12px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--nw-text-primary);
+  word-break: break-word;
+  max-height: 320px;
+  overflow-y: auto;
 }
 
 /* 设定冲突卡片 */
@@ -2341,6 +3136,141 @@ onUnmounted(() => {
   color: var(--el-color-success);
   font-weight: 500;
   padding-left: 4px;
+}
+
+/* ==================== 批量编辑提案 ==================== */
+.proposal-card {
+  border: 1px solid var(--nw-border);
+  border-radius: var(--nw-radius);
+  background: var(--nw-bg-primary);
+  padding: 10px 12px;
+  margin: 8px 0;
+}
+
+.proposal-card-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.proposal-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--nw-text-primary);
+}
+
+.proposal-summary {
+  font-size: 12px;
+  color: var(--nw-text-secondary);
+}
+
+.proposal-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.proposal-item {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 8px;
+  border-radius: var(--nw-radius-sm);
+  background: var(--nw-bg-secondary);
+}
+
+.proposal-item.is-unmatched {
+  opacity: 0.7;
+  border-left: 3px solid var(--el-color-warning);
+}
+
+.proposal-item-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.proposal-item-meta {
+  font-size: 12px;
+  color: var(--nw-text-secondary);
+  margin-bottom: 4px;
+}
+
+.proposal-reason {
+  color: var(--nw-text-tertiary);
+}
+
+.proposal-unmatched-tip {
+  color: var(--el-color-warning);
+}
+
+.proposal-diff {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 13px;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.diff-before {
+  color: var(--el-color-danger);
+  text-decoration: line-through;
+  opacity: 0.85;
+  white-space: pre-wrap;
+}
+
+.diff-after {
+  color: var(--el-color-success);
+  white-space: pre-wrap;
+}
+
+.proposal-replace-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.proposal-hint {
+  font-size: 12px;
+  color: var(--nw-text-secondary);
+}
+
+.proposal-pre {
+  margin: 0;
+  padding: 8px;
+  border-radius: var(--nw-radius-sm);
+  background: var(--nw-bg-secondary);
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow-y: auto;
+  font-family: var(--nw-font-body);
+}
+
+.proposal-pre-scroll {
+  max-height: 140px;
+}
+
+.proposal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.proposal-reject {
+  margin-left: auto;
+}
+
+.proposal-done {
+  font-size: 13px;
+  color: var(--el-color-success);
 }
 
 </style>

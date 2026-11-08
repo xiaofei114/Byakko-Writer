@@ -23,6 +23,8 @@ export async function sendChatMessageStream(
     sessionId?: string;
     bookId: string;
     chapterId?: string;
+    /** 当前正在编辑的大纲目标（书籍/卷/章节） */
+    outlineTarget?: { level: 'book' | 'volume' | 'chapter'; targetId?: string };
     message: string;
     config: AIConfig;
   },
@@ -67,6 +69,7 @@ export async function sendChatMessageStream(
     sessionId: params.sessionId,
     bookId: params.bookId,
     chapterId: params.chapterId,
+    outlineTarget: params.outlineTarget,
     message: params.message,
     config: {
       provider: params.config.provider,
@@ -74,7 +77,9 @@ export async function sendChatMessageStream(
       api_url: params.config.apiUrl,
       model: params.config.model,
       temperature: params.config.temperature,
-      max_tokens: params.config.maxTokens
+      max_tokens: params.config.maxTokens,
+      max_rounds: params.config.maxRounds,
+      enable_thinking: params.config.enableThinking
     }
   }).catch((error) => {
     if (!isCompleted) {
@@ -190,7 +195,9 @@ export async function sendPolishRequest(
       api_url: params.config.apiUrl,
       model: params.config.model,
       temperature: params.config.temperature,
-      max_tokens: params.config.maxTokens
+      max_tokens: params.config.maxTokens,
+      max_rounds: params.config.maxRounds,
+      enable_thinking: params.config.enableThinking
     }
   }).catch((error) => {
     if (!isCompleted) {

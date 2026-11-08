@@ -22,6 +22,24 @@ pub async fn start_auto_story_memory_service() {
 }
 
 async fn check_and_update_all_books() -> anyhow::Result<()> {
+    // 尊重设置中的「自动更新故事记忆」开关，未开启时直接跳过
+    match crate::services::config_service::load_config() {
+        Ok(config) => {
+            if !config.auto_story_memory {
+                log::debug!("[Auto StoryMemory] 自动更新已在设置中关闭，跳过本轮检查");
+                return Ok(());
+            }
+            if config.ai.api_key.is_empty() {
+                log::debug!("[Auto StoryMemory] 未配置 API Key，跳过本轮检查");
+                return Ok(());
+            }
+        }
+        Err(e) => {
+            log::warn!("[Auto StoryMemory] 读取配置失败，跳过本轮检查: {}", e);
+            return Ok(());
+        }
+    }
+
     let pool = get_pool().await?;
 
     let books = sqlx::query_scalar::<_, String>("SELECT id FROM books")

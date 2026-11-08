@@ -3,10 +3,20 @@ use crate::services::book_service;
 use crate::services::summary_generator_service;
 use crate::services::config_service;
 
-/// 创建书籍
+/// 创建书籍（同时创建第一卷与第一章）
 #[tauri::command]
-pub async fn create_book(title: String) -> Result<Book, String> {
-    book_service::create_book(title).await.map_err(|e| e.to_string())
+pub async fn create_book(
+    title: String,
+    author: Option<String>,
+    description: Option<String>,
+) -> Result<Book, String> {
+    book_service::create_book(
+        title,
+        author.unwrap_or_default(),
+        description.unwrap_or_default(),
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// 获取书籍列表
@@ -71,8 +81,8 @@ pub async fn create_volume(book_id: String, title: String) -> Result<serde_json:
 
 /// 删除卷
 #[tauri::command]
-pub async fn delete_volume(volume_id: String) -> Result<(), String> {
-    book_service::delete_volume(volume_id).await.map_err(|e| e.to_string())
+pub async fn delete_volume(book_id: String, volume_id: String) -> Result<(), String> {
+    book_service::delete_volume(book_id, volume_id).await.map_err(|e| e.to_string())
 }
 
 /// 更新卷标题
@@ -89,23 +99,25 @@ pub async fn create_chapter(
     volume_id: String,
 ) -> Result<Chapter, String> {
     let chapter = book_service::create_chapter(book_id.clone(), title, volume_id).await.map_err(|e| e.to_string())?;
-    
-    // 后台触发缺失摘要的生成（包含新创建的章节）
+
+    // 只需处理这一章：新建章节内容为空，实际不会产生 AI 调用；
+    // 避免每次建章都全库扫描 + 批量生成（token 与限流风险）。
+    let chapter_id_for_task = chapter.id.clone();
     let book_id_for_task = book_id.clone();
     tokio::spawn(async move {
         match config_service::load_config() {
             Ok(config) => {
                 if !config.ai.api_key.is_empty() {
-                    log::info!("[CreateChapter] 触发后台摘要生成 for book: {}", book_id_for_task);
                     match summary_generator_service::generate_missing_summaries_background(
                         book_id_for_task,
                         config.ai,
+                        Some(chapter_id_for_task),
                     ).await {
                         Ok(result) => {
-                            log::info!("[CreateChapter] 后台摘要生成完成: {:?}", result);
+                            log::info!("[CreateChapter] 新章节摘要处理完成: {:?}", result);
                         }
                         Err(e) => {
-                            log::error!("[CreateChapter] 后台摘要生成失败: {}", e);
+                            log::error!("[CreateChapter] 新章节摘要处理失败: {}", e);
                         }
                     }
                 } else {
@@ -117,14 +129,14 @@ pub async fn create_chapter(
             }
         }
     });
-    
+
     Ok(chapter)
 }
 
 /// 删除章节
 #[tauri::command]
-pub async fn delete_chapter(chapter_id: String) -> Result<(), String> {
-    book_service::delete_chapter(chapter_id).await.map_err(|e| e.to_string())
+pub async fn delete_chapter(book_id: String, chapter_id: String) -> Result<(), String> {
+    book_service::delete_chapter(book_id, chapter_id).await.map_err(|e| e.to_string())
 }
 
 /// 加载章节内容

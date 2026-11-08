@@ -63,20 +63,25 @@ async fn save_detected_conflict(
     book_id: &str,
     description: &str,
     suggestion: &str,
+    severity: &str,
+    chapter_id: Option<&str>,
 ) -> anyhow::Result<()> {
     let pool = get_pool().await?;
     let id = format!("conflict_{}", Uuid::new_v4().to_string().replace('-', "_"));
     let now = chrono::Utc::now().timestamp();
+    let severity = if severity.is_empty() { "medium" } else { severity };
 
     sqlx::query(
-        "INSERT INTO detected_conflicts (id, book_id, description, suggestion, detected_at, is_ignored)
-         VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+        "INSERT INTO detected_conflicts (id, book_id, description, suggestion, severity, detected_at, is_ignored, chapter_id, needs_review, resolved_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, 0, NULL)",
     )
     .bind(&id)
     .bind(book_id)
     .bind(description)
     .bind(suggestion)
+    .bind(severity)
     .bind(now)
+    .bind(chapter_id)
     .execute(pool)
     .await?;
 
@@ -148,12 +153,43 @@ pub async fn delete_conflict(conflict_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 标记冲突已解决
+pub async fn resolve_conflict(conflict_id: &str) -> anyhow::Result<()> {
+    let pool = get_pool().await?;
+    let now = chrono::Utc::now().timestamp();
+    sqlx::query(
+        "UPDATE detected_conflicts SET resolved_at = ?1, needs_review = 0 WHERE id = ?2",
+    )
+    .bind(now)
+    .bind(conflict_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// 章节改稿后，把该章关联的未解决冲突标记为「待复核」
+pub async fn mark_chapter_conflicts_for_review(chapter_id: &str) {
+    let Ok(pool) = get_pool().await else {
+        return;
+    };
+    let _ = sqlx::query(
+        "UPDATE detected_conflicts SET needs_review = 1
+         WHERE chapter_id = ?1 AND is_ignored = 0 AND resolved_at IS NULL",
+    )
+    .bind(chapter_id)
+    .execute(pool)
+    .await;
+}
+
 /// 获取书籍的所有未忽略冲突
 pub async fn get_active_conflicts(book_id: &str) -> anyhow::Result<Vec<DetectedConflict>> {
     let pool = get_pool().await?;
     let rows = sqlx::query_as::<_, DetectedConflict>(
-        "SELECT id, book_id, description, suggestion, detected_at, is_ignored, ignored_at
-         FROM detected_conflicts WHERE book_id = ?1 AND is_ignored = 0 ORDER BY detected_at DESC",
+        "SELECT id, book_id, description, suggestion, severity, detected_at, is_ignored, ignored_at,
+                chapter_id, needs_review, resolved_at
+         FROM detected_conflicts
+         WHERE book_id = ?1 AND is_ignored = 0 AND resolved_at IS NULL
+         ORDER BY detected_at DESC",
     )
     .bind(book_id)
     .fetch_all(pool)
@@ -161,11 +197,12 @@ pub async fn get_active_conflicts(book_id: &str) -> anyhow::Result<Vec<DetectedC
     Ok(rows)
 }
 
-/// 获取书籍的所有冲突（包括已忽略的）
+/// 获取书籍的所有冲突（包括已忽略/已解决）
 pub async fn get_all_conflicts(book_id: &str) -> anyhow::Result<Vec<DetectedConflict>> {
     let pool = get_pool().await?;
     let rows = sqlx::query_as::<_, DetectedConflict>(
-        "SELECT id, book_id, description, suggestion, detected_at, is_ignored, ignored_at
+        "SELECT id, book_id, description, suggestion, severity, detected_at, is_ignored, ignored_at,
+                chapter_id, needs_review, resolved_at
          FROM detected_conflicts WHERE book_id = ?1 ORDER BY detected_at DESC",
     )
     .bind(book_id)
@@ -252,7 +289,8 @@ fn build_detection_tools() -> Vec<ToolDef> {
                     "properties": {
                         "description": {"type": "string", "description": "冲突描述，如'第1章叶铃音是黑发，第5章变成了银发'"},
                         "suggestion": {"type": "string", "description": "修改建议"},
-                        "severity": {"type": "string", "description": "严重程度：high/medium/low"}
+                        "severity": {"type": "string", "description": "严重程度：high/medium/low"},
+                        "chapterId": {"type": "string", "description": "可选：冲突主要涉及的章节ID（改稿后据此提示复核）"}
                     },
                     "required": ["description", "suggestion", "severity"]
                 }),
@@ -361,7 +399,8 @@ pub async fn run_detection(book_id: &str, config: &AIConfig) -> anyhow::Result<V
                         log::info!("[Conflict] ⚠ 跳过无效报告: {}", desc);
                     } else {
                         log::info!("[Conflict] ⚠ 报告冲突 ({}): {} | 建议: {}", sev, desc, sug);
-                        save_detected_conflict(book_id, desc, sug).await?;
+                        let chapter_id = args.get("chapterId").and_then(|v| v.as_str());
+                        save_detected_conflict(book_id, desc, sug, sev, chapter_id).await?;
                         total_conflicts += 1;
                     }
                     messages.push(ChatMessage {

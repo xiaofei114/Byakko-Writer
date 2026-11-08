@@ -346,9 +346,9 @@ const onFontChange = () => {
             <label class="form-label">最大 Token</label>
             <el-input-number
               v-model="configStore.config.ai.maxTokens"
-              :min="100"
-              :max="4000"
-              :step="100"
+              :min="500"
+              :max="8000"
+              :step="500"
               @change="configStore.saveConfig"
             />
           </div>
@@ -365,6 +365,17 @@ const onFontChange = () => {
           </div>
           <div class="form-hint-row">
             <span class="form-hint">AI 调用工具的最大轮次数，可设置为 20-50；越大上下文越完整但耗时越长</span>
+          </div>
+
+          <div class="form-row">
+            <label class="form-label">思考模式</label>
+            <el-switch
+              v-model="configStore.config.ai.enableThinking"
+              @change="configStore.saveConfig"
+            />
+          </div>
+          <div class="form-hint-row">
+            <span class="form-hint">开启后每轮先让 AI 分析需求与风险、列出计划，再执行；会多一次小请求（约几百字）</span>
           </div>
         </div>
       </el-tab-pane>

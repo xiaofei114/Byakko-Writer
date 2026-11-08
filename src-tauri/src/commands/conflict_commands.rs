@@ -36,6 +36,14 @@ pub async fn delete_conflict(conflict_id: String) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// 标记冲突已解决
+#[tauri::command]
+pub async fn resolve_conflict(conflict_id: String) -> Result<(), String> {
+    conflict_service::resolve_conflict(&conflict_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// 获取所有冲突（包括已忽略的）
 #[tauri::command]
 pub async fn get_all_conflicts(book_id: String) -> Result<Vec<DetectedConflict>, String> {

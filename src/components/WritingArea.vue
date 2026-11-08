@@ -161,17 +161,41 @@ watch(() => bookStore.currentChapter?.title, (newTitle) => {
   updateChapterTitleDisplay(newTitle);
 }, { immediate: true });
 
-const saveChapterTitle = async () => {
-  if (bookStore.currentChapter) {
-    const newTitle = composeChapterTitle();
-    if (newTitle) {
-      try {
-        await bookStore.updateChapterTitle(bookStore.currentChapter.id, newTitle);
-      } catch (error) {
-        console.error('章节标题保存失败:', error);
-      }
-    }
+// 章节标题保存：
+// 旧实现只在 blur 时用当前章节 + 当前输入框取值，若用户直接点侧边栏切章，
+// blur 会晚于章节切换，导致标题写到错误的章节或丢失。
+// 现在在 input 时就捕获「章节ID + 标题快照」，再防抖写入，切章也不会写错。
+let titleSaveTimer: number | null = null;
+let pendingTitleSave: { id: string; title: string } | null = null;
+
+const flushTitleSave = () => {
+  if (titleSaveTimer) {
+    clearTimeout(titleSaveTimer);
+    titleSaveTimer = null;
   }
+
+  const pending = pendingTitleSave;
+  pendingTitleSave = null;
+  if (!pending) return;
+
+  const chapter = bookStore.currentBook?.chapters.find(c => c.id === pending.id);
+  if (!chapter || chapter.title === pending.title) return;
+
+  bookStore.updateChapterTitle(pending.id, pending.title).catch(error => {
+    console.error('章节标题保存失败:', error);
+  });
+};
+
+const scheduleTitleSave = () => {
+  const id = bookStore.currentChapter?.id;
+  if (!id) return;
+
+  const title = composeChapterTitle();
+  if (!title) return;
+
+  pendingTitleSave = { id, title };
+  if (titleSaveTimer) clearTimeout(titleSaveTimer);
+  titleSaveTimer = window.setTimeout(flushTitleSave, 400);
 };
 
 // 自动保存
@@ -510,6 +534,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   stopAutoSave();
+  flushTitleSave();
   if (inputDebounceTimer) {
     clearTimeout(inputDebounceTimer);
   }
@@ -598,15 +623,17 @@ onUnmounted(() => {
                 v-model="chapterNumber"
                 class="composer-input number"
                 placeholder=""
-                @blur="saveChapterTitle"
+                @input="scheduleTitleSave"
+                @blur="flushTitleSave"
               />
               <span class="composer-text">章</span>
               <input
                 v-model="chapterName"
                 class="composer-input name"
                 placeholder="请输入章节标题"
-                @blur="saveChapterTitle"
-                @keyup.enter="saveChapterTitle"
+                @input="scheduleTitleSave"
+                @blur="flushTitleSave"
+                @keyup.enter="flushTitleSave"
               />
             </div>
           </div>

@@ -6,12 +6,7 @@ import {
   User,
   ArrowRight
 } from '@element-plus/icons-vue';
-import { marked } from 'marked';
-
-marked.setOptions({
-  breaks: true,
-  gfm: true
-});
+import { renderMarkdown } from '../utils/markdown';
 
 const props = defineProps<{
   modelValue: boolean;
@@ -25,11 +20,6 @@ const emit = defineEmits<{
 
 const bookStore = useBookStore();
 const loading = ref(false);
-
-const renderMarkdown = (content: string) => {
-  if (!content) return '';
-  return marked.parse(content);
-};
 
 // 角色卡数据
 const characterCards = ref<CharacterCard[]>([]);

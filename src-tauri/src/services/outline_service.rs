@@ -1,5 +1,96 @@
 use crate::db::get_pool;
 use crate::models::Outline;
+use serde::{Deserialize, Serialize};
+
+/// 一次大纲变更（支持书籍/卷/章节三级 + 粗纲/细纲）
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OutlineChange {
+    /// book | volume | chapter
+    pub level: String,
+    #[serde(alias = "volumeId", default)]
+    pub volume_id: Option<String>,
+    #[serde(alias = "chapterId", default)]
+    pub chapter_id: Option<String>,
+    #[serde(alias = "outlineType")]
+    pub outline_type: String,
+    pub content: String,
+}
+
+impl OutlineChange {
+    /// 校验并归一化出 (volume_id, chapter_id)
+    fn resolve_target(&self) -> anyhow::Result<(Option<String>, Option<String>)> {
+        match self.level.as_str() {
+            "book" => Ok((None, None)),
+            "volume" => {
+                let volume_id = self
+                    .volume_id
+                    .clone()
+                    .filter(|v| !v.is_empty())
+                    .ok_or_else(|| anyhow::anyhow!("卷级大纲缺少 volumeId"))?;
+                Ok((Some(volume_id), None))
+            }
+            "chapter" => {
+                let chapter_id = self
+                    .chapter_id
+                    .clone()
+                    .filter(|v| !v.is_empty())
+                    .ok_or_else(|| anyhow::anyhow!("章节大纲缺少 chapterId"))?;
+                Ok((None, Some(chapter_id)))
+            }
+            other => Err(anyhow::anyhow!("未知大纲层级: {}", other)),
+        }
+    }
+
+    pub fn label(&self) -> String {
+        let level = match self.level.as_str() {
+            "book" => "书籍",
+            "volume" => "卷",
+            "chapter" => "章节",
+            other => other,
+        };
+        let outline = if self.outline_type == "fine" { "细纲" } else { "粗纲" };
+        format!("{}·{}", level, outline)
+    }
+}
+
+/// 批量保存大纲（AI 一次提交多层级修改时使用，顺序写入，单条失败不影响其它）
+pub async fn save_outlines_batch(
+    book_id: &str,
+    changes: &[OutlineChange],
+) -> anyhow::Result<(usize, Vec<String>)> {
+    let mut saved = 0usize;
+    let mut failures: Vec<String> = Vec::new();
+
+    for change in changes {
+        let (volume_id, chapter_id) = match change.resolve_target() {
+            Ok(target) => target,
+            Err(e) => {
+                failures.push(format!("{}：{}", change.label(), e));
+                continue;
+            }
+        };
+
+        if change.outline_type != "coarse" && change.outline_type != "fine" {
+            failures.push(format!("{}：大纲类型必须是 coarse/fine", change.label()));
+            continue;
+        }
+
+        match save_outline(
+            book_id.to_string(),
+            volume_id,
+            chapter_id,
+            change.outline_type.clone(),
+            change.content.clone(),
+        )
+        .await
+        {
+            Ok(_) => saved += 1,
+            Err(e) => failures.push(format!("{}：{}", change.label(), e)),
+        }
+    }
+
+    Ok((saved, failures))
+}
 
 /// 创建或更新大纲
 pub async fn save_outline(
@@ -11,9 +102,11 @@ pub async fn save_outline(
 ) -> anyhow::Result<Outline> {
     let pool = get_pool().await?;
     
-    let id = format!("outline_{}_{}", 
+    let id = format!(
+        "outline_{}_{}_{}",
         outline_type,
-        chrono::Utc::now().timestamp_millis()
+        chrono::Utc::now().timestamp_millis(),
+        rand::random::<u16>()
     );
     let now = chrono::Utc::now().timestamp();
     
