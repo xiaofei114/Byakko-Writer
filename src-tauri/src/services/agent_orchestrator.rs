@@ -51,6 +51,25 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
     }
 }
 
+/// 流式读取的下一步
+enum StreamStep<T> {
+    Item(T),
+    End,
+    Timeout,
+}
+
+/// 等待下一个流分片；超过 `idle_secs` 没有数据就返回 Timeout，避免界面永久卡在「思考中/创作中」
+async fn next_stream_step<S>(stream: &mut S, idle_secs: u64) -> StreamStep<S::Item>
+where
+    S: futures::Stream + Unpin,
+{
+    match tokio::time::timeout(std::time::Duration::from_secs(idle_secs), stream.next()).await {
+        Ok(Some(item)) => StreamStep::Item(item),
+        Ok(None) => StreamStep::End,
+        Err(_) => StreamStep::Timeout,
+    }
+}
+
 fn get_session_state(session_id: &str) -> Option<SessionState> {
     let states = SESSION_STATES.lock().ok()?;
     states.as_ref()?.get(session_id).cloned()
@@ -1404,7 +1423,29 @@ impl AgentOrchestrator {
         // 网络分块可能把一行 data: 从中间切断，必须跨块缓冲
         let mut sse_buffer = String::new();
 
-        while let Some(chunk_result) = stream.next().await {
+        loop {
+            let chunk_result = match next_stream_step(&mut stream, 60).await {
+                StreamStep::Item(item) => item,
+                StreamStep::End => break,
+                StreamStep::Timeout => {
+                    let error_msg = "AI 流式响应超过 60 秒无数据，已中止".to_string();
+                    log::error!("[Agent] {}", error_msg);
+                    let error_event = StreamEvent {
+                        session_id: session_id.to_string(),
+                        chunk: String::new(),
+                        is_complete: true,
+                        is_tool_call: false,
+                        tool_name: None,
+                        tool_display_name: None,
+                        tool_params: None,
+                        is_error: true,
+                        error_message: Some(error_msg),
+                    };
+                    let _ = app.emit("ai-chat-stream", error_event);
+                    break;
+                }
+            };
+
             match chunk_result {
                 Ok(chunk) => {
                     for content in crate::services::ai_service::extract_sse_deltas(&mut sse_buffer, &chunk) {
@@ -1596,10 +1637,19 @@ impl AgentOrchestrator {
             ChatMessage::new("user", user_prompt),
         ];
 
-        let response = match send_ai_message_stream(thinking_messages, thinking_config).await {
-            Ok(response) => response,
-            Err(e) => {
+        let response = match tokio::time::timeout(
+            std::time::Duration::from_secs(90),
+            send_ai_message_stream(thinking_messages, thinking_config),
+        )
+        .await
+        {
+            Ok(Ok(response)) => response,
+            Ok(Err(e)) => {
                 log::warn!("[Agent] 思考请求失败（{}，已跳过）: {}", label, e);
+                return None;
+            }
+            Err(_) => {
+                log::warn!("[Agent] 思考请求 90 秒未响应（{}，已跳过）", label);
                 return None;
             }
         };
@@ -1620,9 +1670,13 @@ impl AgentOrchestrator {
         let mut text = String::new();
         let mut stream_error: Option<String> = None;
 
-        while let Some(chunk_result) = stream.next().await {
-            match chunk_result {
-                Ok(chunk) => {
+        // 记录最后一次「真正有内容」的时间：有些服务会持续发 keep-alive 空事件，
+        // 只看网络分片会以为一直在动，导致界面永远停在「思考中」。
+        let mut last_delta = std::time::Instant::now();
+
+        loop {
+            match next_stream_step(&mut stream, 5).await {
+                StreamStep::Item(Ok(chunk)) => {
                     for delta in
                         crate::services::ai_service::extract_sse_deltas_full(&mut sse_buffer, &chunk)
                     {
@@ -1635,6 +1689,7 @@ impl AgentOrchestrator {
                             continue;
                         }
 
+                        last_delta = std::time::Instant::now();
                         text.push_str(&piece);
                         let _ = app.emit(
                             "ai-thinking",
@@ -1648,9 +1703,16 @@ impl AgentOrchestrator {
                         );
                     }
                 }
-                Err(e) => {
+                StreamStep::Item(Err(e)) => {
                     stream_error = Some(e.to_string());
                     break;
+                }
+                StreamStep::End => break,
+                StreamStep::Timeout => {
+                    if last_delta.elapsed() >= std::time::Duration::from_secs(45) {
+                        stream_error = Some("思考 45 秒没有新内容，已中止".to_string());
+                        break;
+                    }
                 }
             }
         }
@@ -1681,6 +1743,11 @@ impl AgentOrchestrator {
         }
 
         let text = text.trim().to_string();
+        let text = if stream_error.is_some() && !text.is_empty() {
+            format!("{}\n\n（思考中断，已停止）", text)
+        } else {
+            text
+        };
 
         let _ = app.emit(
             "ai-thinking",
@@ -2178,7 +2245,16 @@ impl AgentOrchestrator {
         let mut sse_buffer = String::new();
         let mut stream_error: Option<String> = None;
 
-        while let Some(chunk_result) = stream.next().await {
+        loop {
+            let chunk_result = match next_stream_step(&mut stream, 60).await {
+                StreamStep::Item(item) => item,
+                StreamStep::End => break,
+                StreamStep::Timeout => {
+                    stream_error = Some("写作流 60 秒无数据，已中止".to_string());
+                    break;
+                }
+            };
+
             match chunk_result {
                 Ok(chunk) => {
                     for content in crate::services::ai_service::extract_sse_deltas(&mut sse_buffer, &chunk) {
