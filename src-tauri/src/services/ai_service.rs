@@ -19,9 +19,13 @@ fn build_client(timeout_secs: u64) -> Client {
         .expect("HTTP 客户端构建失败")
 }
 
-/// 判断错误是否可重试（网络错误、超时可重试；API 错误如 401/403/429 不可重试）
+/// 判断错误是否可重试
+///
+/// 可重试：网络超时/连接失败、限流（429）、服务端 5xx、模型过载。
+/// 不可重试：401/403（Key 或权限问题）、400（参数错）、404 等。
 fn is_retryable_error(err: &anyhow::Error) -> bool {
     let msg = err.to_string().to_lowercase();
+
     msg.contains("timeout")
         || msg.contains("timed out")
         || msg.contains("connection refused")
@@ -29,6 +33,14 @@ fn is_retryable_error(err: &anyhow::Error) -> bool {
         || msg.contains("connection aborted")
         || msg.contains("dns error")
         || msg.contains("error sending request")
+        || msg.contains("api错误 (429")
+        || msg.contains("api错误 (500")
+        || msg.contains("api错误 (502")
+        || msg.contains("api错误 (503")
+        || msg.contains("api错误 (504")
+        || msg.contains("rate limit")
+        || msg.contains("too many requests")
+        || msg.contains("overloaded")
 }
 
 /// 带重试的请求执行器
@@ -43,8 +55,9 @@ where
             Ok(result) => return Ok(result),
             Err(e) => {
                 if is_retryable_error(&e) && attempt < MAX_RETRIES {
-                    let delay = Duration::from_millis(500 * 2u64.pow(attempt)); // 500ms, 1s, 2s
-                    log::warn!("[AI] 请求失败（可重试），{}/{}秒后重试: {}", attempt + 1, MAX_RETRIES, e);
+                    // 1s、2s 退避；限流/5xx 给服务端一点恢复时间
+                    let delay = Duration::from_millis(1000 * 2u64.pow(attempt));
+                    log::warn!("[AI] 请求失败（可重试），{} 秒后重试: {}", attempt + 1, e);
                     tokio::time::sleep(delay).await;
                     last_err = Some(e);
                 } else {
